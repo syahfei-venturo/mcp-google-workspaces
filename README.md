@@ -1,29 +1,29 @@
 <div align="center">
   <!-- Main Title Link -->
-  <b>mcp-google-sheets</b>
+  <b>mcp-google-workspace</b>
 
   <!-- Description Paragraph -->
   <p align="center">
-    <i>Your AI Assistant's Gateway to Google Sheets! </i>📊
+    <i>Your AI Assistant's Gateway to Google Workspace! </i>📊
   </p>
 
-[![PyPI - Version](https://img.shields.io/pypi/v/mcp-google-sheets)](https://pypi.org/project/mcp-google-sheets/)
-[![PyPI Downloads](https://static.pepy.tech/badge/mcp-google-sheets)](https://pepy.tech/projects/mcp-google-sheets)
-![GitHub License](https://img.shields.io/github/license/xing5/mcp-google-sheets)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/xing5/mcp-google-sheets/release.yml)
+[![PyPI - Version](https://img.shields.io/pypi/v/mcp-google-workspace)](https://pypi.org/project/mcp-google-workspace/)
+[![PyPI Downloads](https://static.pepy.tech/badge/mcp-google-workspace)](https://pepy.tech/projects/mcp-google-workspace)
+![GitHub License](https://img.shields.io/github/license/xing5/mcp-google-workspace)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/xing5/mcp-google-workspace/release.yml)
 </div>
 
 ---
 
 ## 🤔 What is this?
 
-`mcp-google-sheets` is a Python-based MCP server that acts as a bridge between any MCP-compatible client (like Claude Desktop) and the Google Sheets API. It allows you to interact with your Google Spreadsheets using a defined set of tools, enabling powerful automation and data manipulation workflows driven by AI.
+`mcp-google-workspace` is a Python-based MCP server that acts as a bridge between any MCP-compatible client (like Claude Desktop) and Google Workspace APIs (Sheets, Docs, and Drive). It allows you to interact with your Google Spreadsheets and Documents using a defined set of tools, enabling powerful automation and data manipulation workflows driven by AI.
 
 ---
 
 ## 🚀 Quick Start (Using `uvx`)
 
-Essentially the server runs in one line: `uvx mcp-google-sheets@latest`. 
+Essentially the server runs in one line: `uvx mcp-google-workspace@latest`. 
 
 This command will automatically download the latest code and run it. **We recommend always using `@latest`** to ensure you have the newest version with the latest features and bug fixes.
 
@@ -66,9 +66,9 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
     *   ➡️ See [**Detailed Authentication & Environment Variables**](#-authentication--environment-variables-detailed) for other options (OAuth, `CREDENTIALS_CONFIG`).
 
 4.  **🏃 Run the Server!**
-    *   `uvx` will automatically download and run the latest version of `mcp-google-sheets`:
+    *   `uvx` will automatically download and run the latest version of `mcp-google-workspace`:
         ```bash
-        uvx mcp-google-sheets@latest
+        uvx mcp-google-workspace@latest
         ```
     *   The server will start and print logs indicating it's ready.
     *   
@@ -80,7 +80,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
     *   ➡️ See [**Usage with Claude Desktop**](#-usage-with-claude-desktop) for examples.
 
 6.  **⚡ Optional: Enable Tool Filtering (Reduce Context Usage)**
-    *   By default, all 19 tools are enabled (~13K tokens). To reduce context usage, enable only the tools you need.
+    *   By default, all tools are enabled. To reduce context usage, enable only the tools you need.
     *   ➡️ See [**Tool Filtering**](#-tool-filtering-reduce-context-usage) for details.
 
 You're ready! Start issuing commands via your MCP client.
@@ -100,7 +100,7 @@ You're ready! Start issuing commands via your MCP client.
 
 ## 🎯 Tool Filtering (Reduce Context Usage)
 
-**Problem:** By default, this MCP server exposes all 19 tools, consuming ~13,000 tokens before any conversation begins. If you only need a few tools, this wastes valuable context window space.
+**Problem:** By default, this MCP server exposes all tools, consuming ~13,000 tokens before any conversation begins. If you only need a few tools, this wastes valuable context window space.
 
 **Solution:** Use tool filtering to enable only the tools you actually use.
 
@@ -115,7 +115,7 @@ You can filter tools using either:
        "google-sheets": {
          "command": "uvx",
          "args": [
-           "mcp-google-sheets@latest",
+           "mcp-google-workspace@latest",
            "--include-tools",
            "get_sheet_data,update_cells,list_spreadsheets,list_sheets"
          ],
@@ -133,7 +133,7 @@ You can filter tools using either:
      "mcpServers": {
        "google-sheets": {
          "command": "uvx",
-         "args": ["mcp-google-sheets@latest"],
+         "args": ["mcp-google-workspace@latest"],
          "env": {
            "SERVICE_ACCOUNT_PATH": "/path/to/credentials.json",
            "ENABLED_TOOLS": "get_sheet_data,update_cells,list_spreadsheets,list_sheets"
@@ -399,7 +399,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
 As shown in the [Ultra Quick Start](#-ultra-quick-start-using-uvx), this is the easiest way. Set environment variables, then run:
 
 ```bash
-uvx mcp-google-sheets@latest
+uvx mcp-google-workspace@latest
 ```
 `uvx` handles fetching and running the package temporarily.
 
@@ -407,11 +407,11 @@ uvx mcp-google-sheets@latest
 
 If you want to modify the code:
 
-1.  **Clone:** `git clone https://github.com/yourusername/mcp-google-sheets.git && cd mcp-google-sheets` (Use actual URL)
+1.  **Clone:** `git clone https://github.com/yourusername/mcp-google-workspace.git && cd mcp-google-workspace` (Use actual URL)
 2.  **Set Environment Variables:** As described above.
 3.  **Run using `uv`:** (Uses the local code)
     ```bash
-    uv run mcp-google-sheets
+    uv run mcp-google-workspace
     # Or via the script name if defined in pyproject.toml, e.g.:
     # uv run start
     ```
@@ -422,7 +422,7 @@ Run the server in a container using the included `Dockerfile`:
 
 ```bash
 # Build the image
-docker build -t mcp-google-sheets .
+docker build -t mcp-google-workspace .
 
 # Run (SSE on port 8000)
 # NOTE: Prefer CREDENTIALS_CONFIG (Base64 credentials content) in containers.
@@ -431,7 +431,7 @@ docker run --rm -p 8000:8000 ^
   -e PORT=8000 ^
   -e CREDENTIALS_CONFIG=YOUR_BASE64_CREDENTIALS ^
   -e DRIVE_FOLDER_ID=YOUR_DRIVE_FOLDER_ID ^
-  mcp-google-sheets
+  mcp-google-workspace
 ```
 
 - Use `CREDENTIALS_CONFIG` instead of `SERVICE_ACCOUNT_PATH` inside Docker to avoid mounting secrets as files.
@@ -456,7 +456,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
   "mcpServers": {
     "google-sheets": {
       "command": "uvx",
-      "args": ["mcp-google-sheets@latest"],
+      "args": ["mcp-google-workspace@latest"],
       "env": {
         "SERVICE_ACCOUNT_PATH": "/full/path/to/your/service-account-key.json",
         "DRIVE_FOLDER_ID": "your_shared_folder_id_here"
@@ -472,7 +472,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
   "mcpServers": {
     "google-sheets": {
       "command": "/Users/yourusername/.local/bin/uvx",
-      "args": ["mcp-google-sheets@latest"],
+      "args": ["mcp-google-workspace@latest"],
       "env": {
         "SERVICE_ACCOUNT_PATH": "/full/path/to/your/service-account-key.json",
         "DRIVE_FOLDER_ID": "your_shared_folder_id_here"
@@ -492,7 +492,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
   "mcpServers": {
     "google-sheets": {
       "command": "uvx",
-      "args": ["mcp-google-sheets@latest"],
+      "args": ["mcp-google-workspace@latest"],
       "env": {
         "CREDENTIALS_PATH": "/full/path/to/your/credentials.json",
         "TOKEN_PATH": "/full/path/to/your/token.json"
@@ -514,7 +514,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
   "mcpServers": {
     "google-sheets": {
       "command": "uvx",
-      "args": ["mcp-google-sheets@latest"],
+      "args": ["mcp-google-workspace@latest"],
       "env": {
         "CREDENTIALS_CONFIG": "ewogICJ0eXBlIjogInNlcnZpY2VfYWNjb3VudCIsCiAgInByb2plY3RfaWQiOiAi...",
         "DRIVE_FOLDER_ID": "your_shared_folder_id_here"
@@ -537,7 +537,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
   "mcpServers": {
     "google-sheets": {
       "command": "uvx",
-      "args": ["mcp-google-sheets@latest"],
+      "args": ["mcp-google-workspace@latest"],
       "env": {
         "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/service-account.json"
       }
@@ -552,7 +552,7 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
   "mcpServers": {
     "google-sheets": {
       "command": "uvx",
-      "args": ["mcp-google-sheets@latest"],
+      "args": ["mcp-google-workspace@latest"],
       "env": {}
     }
   }
@@ -571,16 +571,16 @@ _Refer to the [ID Reference Guide](#-id-reference-guide) for more information ab
 ```json
 {
   "mcpServers": {
-    "mcp-google-sheets-local": {
+    "mcp-google-workspace-local": {
       "command": "uv",
       "args": [
         "run",
         "--directory",
-        "/path/to/your/mcp-google-sheets",
-        "mcp-google-sheets"
+        "/path/to/your/mcp-google-workspace",
+        "mcp-google-workspace"
       ],
       "env": {
-        "SERVICE_ACCOUNT_PATH": "/path/to/your/mcp-google-sheets/service_account.json",
+        "SERVICE_ACCOUNT_PATH": "/path/to/your/mcp-google-workspace/service_account.json",
         "DRIVE_FOLDER_ID": "your_drive_folder_id_here"
       }
     }

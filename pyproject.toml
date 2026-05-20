@@ -1,23 +1,35 @@
 [project]
-name = "mcp-google-sheets"
+name = "mcp-google-workspace"
 dynamic = ["version"]
-description = "This MCP server integrates with your Google Drive and Google Sheets, to enable creating and modifying spreadsheets."
+description = "MCP server for Google Workspace: Sheets, Docs, and Drive integration for creating and modifying documents and spreadsheets."
 readme = "README.md"
 requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business",
+]
 dependencies = [
     "mcp>=1.8.0",
     "google-auth>=2.28.1",
     "google-auth-oauthlib>=1.2.0",
     "google-api-python-client>=2.117.0",
+    "RestrictedPython>=7.0",
 ]
 [[project.authors]]
 name = "Xing Wu"
 email = "xingwu.cs@gmail.com"
 
 [project.urls]
-"Homepage" = "https://github.com/xing5/mcp-google-sheets"
-"Bug Tracker" = "https://github.com/xing5/mcp-google-sheets/issues"
-"Repository" = "https://github.com/xing5/mcp-google-sheets.git"
+"Homepage" = "https://github.com/xing5/mcp-google-workspace"
+"Bug Tracker" = "https://github.com/xing5/mcp-google-workspace/issues"
+"Repository" = "https://github.com/xing5/mcp-google-workspace.git"
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]
@@ -32,4 +44,15 @@ strict = true
 fallback-version = "0.0.0"
 
 [project.scripts]
-mcp-google-sheets = "mcp_google_sheets:main"
+mcp-google-workspace = "mcp_google_workspace:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=7.1.0",
+    "pytest-mock>=3.10",
+    "ruff>=0.2.0",
+]
+
+[project.license]
+text = "MIT"
