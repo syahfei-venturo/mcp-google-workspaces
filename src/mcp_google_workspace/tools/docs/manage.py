@@ -10,7 +10,11 @@ from googleapiclient.http import MediaInMemoryUpload
 from mcp.server.fastmcp import Context
 
 from ...registry import ToolParameter, ToolRegistry
-from ...utils.common import drive_create_with_fallback, escape_drive_value
+from ...utils.common import (
+    drive_create_with_fallback,
+    escape_drive_value,
+    sanitize_http_error,
+)
 from ._utils import safe_batch_update, validate_document_id
 
 logger = logging.getLogger(__name__)
@@ -64,8 +68,11 @@ def create_document_from_html(
         document, warning = drive_create_with_fallback(
             drive_service, file_body, media_body=media
         )
+    except HttpError as e:
+        return {"error": sanitize_http_error(e, "Create document from HTML")}
     except Exception as e:
-        return {"error": f"Failed to create document from HTML: {e}"}
+        logger.error("Create document from HTML failed: %s", e)
+        return {"error": "Create document from HTML failed: unexpected error"}
 
     parents = document.get("parents")
     result: Dict[str, Any] = {
@@ -117,8 +124,11 @@ def overwrite_document_from_html(
             )
             .execute()
         )
+    except HttpError as e:
+        return {"error": sanitize_http_error(e, "Overwrite document")}
     except Exception as e:
-        return {"error": f"Failed to overwrite document: {e}"}
+        logger.error("Overwrite document failed: %s", e)
+        return {"error": "Overwrite document failed: unexpected error"}
 
     return {
         "documentId": result.get("id", document_id),
@@ -153,8 +163,11 @@ def append_html(
             .execute()
         )
         current_html = current_html_bytes.decode("utf-8")
+    except HttpError as e:
+        return {"error": sanitize_http_error(e, "Export document as HTML")}
     except Exception as e:
-        return {"error": f"Failed to export document as HTML: {e}"}
+        logger.error("Export document as HTML failed: %s", e)
+        return {"error": "Export document as HTML failed: unexpected error"}
 
     # Insert new HTML before </body>
     match = re.search(r"</body>", current_html, re.IGNORECASE)
@@ -186,8 +199,11 @@ def append_html(
             )
             .execute()
         )
+    except HttpError as e:
+        return {"error": sanitize_http_error(e, "Update document")}
     except Exception as e:
-        return {"error": f"Failed to update document: {e}"}
+        logger.error("Update document failed: %s", e)
+        return {"error": "Update document failed: unexpected error"}
 
     return {
         "documentId": result.get("id", document_id),
@@ -218,8 +234,11 @@ def create_document(
 
     try:
         document, warning = drive_create_with_fallback(drive_service, file_body)
+    except HttpError as e:
+        return {"error": sanitize_http_error(e, "Create document")}
     except Exception as e:
-        return {"error": f"Failed to create document: {e}"}
+        logger.error("Create document failed: %s", e)
+        return {"error": "Create document failed: unexpected error"}
 
     parents = document.get("parents")
     result: Dict[str, Any] = {
@@ -295,7 +314,7 @@ def list_documents(
             fallback_query = "mimeType='application/vnd.google-apps.document'"
             results = _list(fallback_query)
         else:
-            return {"error": f"Failed to list documents: {e}", "items": []}
+            return {"error": sanitize_http_error(e, "List documents"), "items": []}
 
     items = [
         {
@@ -364,21 +383,19 @@ def share_document(
                     "permissionId": result.get("id"),
                 }
             )
-        except Exception as e:
-            if isinstance(e, HttpError):
-                try:
-                    error_content = json.loads(e.content)
-                    error_details = error_content.get("error", {}).get(
-                        "message", str(e)
-                    )
-                except (json.JSONDecodeError, AttributeError):
-                    error_details = str(e)
-            else:
-                error_details = "Permission denied or invalid request"
+        except HttpError as e:
             failures.append(
                 {
                     "email_address": email_address,
-                    "error": f"Failed to share: {error_details}",
+                    "error": sanitize_http_error(e, "Share document"),
+                }
+            )
+        except Exception as e:
+            logger.error("Share document failed for %s: %s", email_address, e)
+            failures.append(
+                {
+                    "email_address": email_address,
+                    "error": "Share document failed: unexpected error",
                 }
             )
 

@@ -4,7 +4,16 @@ import logging
 import re
 from typing import Any, Dict, Optional
 
+from .common import validate_google_id
+
 logger = logging.getLogger(__name__)
+
+
+def validate_spreadsheet_id(
+    spreadsheet_id: str,
+) -> Optional[Dict[str, str]]:
+    """Return error dict if spreadsheet_id is invalid, else None."""
+    return validate_google_id(spreadsheet_id, "spreadsheet_id")
 
 
 class SheetNotFoundError(ValueError):

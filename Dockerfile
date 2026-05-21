@@ -1,4 +1,4 @@
-FROM alpine:latest AS base
+FROM alpine:3.21 AS base
 
 WORKDIR /app
 # Set environment variables for non-interactive installs and minimal locale

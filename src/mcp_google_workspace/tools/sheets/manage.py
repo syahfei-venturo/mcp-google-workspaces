@@ -7,8 +7,12 @@ from googleapiclient.errors import HttpError
 from mcp.server.fastmcp import Context
 
 from ...registry import ToolParameter, ToolRegistry
-from ...utils.common import drive_create_with_fallback, escape_drive_value
-from ...utils.sheets import get_sheet_id
+from ...utils.common import (
+    drive_create_with_fallback,
+    escape_drive_value,
+    sanitize_http_error,
+)
+from ...utils.sheets import get_sheet_id, validate_spreadsheet_id
 
 
 def create_spreadsheet(
@@ -33,7 +37,7 @@ def create_spreadsheet(
     try:
         spreadsheet, warning = drive_create_with_fallback(drive_service, file_body)
     except HttpError as e:
-        return {"error": f"Failed to create spreadsheet: {e}"}
+        return {"error": sanitize_http_error(e, "Create spreadsheet")}
 
     parents = spreadsheet.get("parents")
     result: Dict[str, Any] = {
@@ -52,6 +56,8 @@ def create_sheet(
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """Create a new sheet tab in an existing spreadsheet."""
+    if err := validate_spreadsheet_id(spreadsheet_id):
+        return err
     sheets_service = ctx.request_context.lifespan_context.sheets_service
 
     result = (
@@ -78,6 +84,8 @@ def delete_sheet(
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """Delete a sheet/tab from a spreadsheet."""
+    if err := validate_spreadsheet_id(spreadsheet_id):
+        return err
     sheets_service = ctx.request_context.lifespan_context.sheets_service
     sheet_id = get_sheet_id(sheets_service, spreadsheet_id, sheet)
 
@@ -101,6 +109,8 @@ def duplicate_spreadsheet(
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """Duplicate an entire spreadsheet."""
+    if err := validate_spreadsheet_id(spreadsheet_id):
+        return err
     drive_service = ctx.request_context.lifespan_context.drive_service
 
     body: Dict[str, Any] = {}
@@ -134,6 +144,8 @@ def move_spreadsheet(
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """Move a spreadsheet to a different Drive folder."""
+    if err := validate_spreadsheet_id(spreadsheet_id):
+        return err
     drive_service = ctx.request_context.lifespan_context.drive_service
 
     current = (
@@ -204,7 +216,7 @@ def list_spreadsheets(
             )
             results = _list("mimeType='application/vnd.google-apps.spreadsheet'")
         else:
-            return {"error": f"Failed to list spreadsheets: {e}", "items": []}
+            return {"error": sanitize_http_error(e, "List spreadsheets"), "items": []}
 
     items = [{"id": s["id"], "title": s["name"]} for s in results.get("files", [])]
     result: Dict[str, Any] = {"items": items}
@@ -218,6 +230,8 @@ def list_sheets(
     ctx: Optional[Context] = None,
 ) -> List[str]:
     """List all sheet tab names within a spreadsheet."""
+    if err := validate_spreadsheet_id(spreadsheet_id):
+        return err
     sheets_service = ctx.request_context.lifespan_context.sheets_service
     spreadsheet = (
         sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
@@ -269,6 +283,10 @@ def copy_sheet(
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """Copy a sheet from one spreadsheet to another."""
+    if err := validate_spreadsheet_id(src_spreadsheet):
+        return err
+    if err := validate_spreadsheet_id(dst_spreadsheet):
+        return err
     sheets_service = ctx.request_context.lifespan_context.sheets_service
     src_sheet_id = get_sheet_id(sheets_service, src_spreadsheet, src_sheet)
 
@@ -320,6 +338,8 @@ def rename_sheet(
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """Rename a sheet tab in a spreadsheet."""
+    if err := validate_spreadsheet_id(spreadsheet):
+        return err
     sheets_service = ctx.request_context.lifespan_context.sheets_service
     sheet_id = get_sheet_id(sheets_service, spreadsheet, sheet)
 
@@ -355,6 +375,8 @@ def share_spreadsheet(
     ctx: Optional[Context] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Share a spreadsheet with users via email."""
+    if err := validate_spreadsheet_id(spreadsheet_id):
+        return err
     drive_service = ctx.request_context.lifespan_context.drive_service
     successes: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
@@ -398,17 +420,10 @@ def share_spreadsheet(
                 }
             )
         except HttpError as e:
-            try:
-                error_content = json.loads(e.content)
-                error_details = error_content.get("error", {}).get(
-                    "message", str(e)
-                )
-            except (json.JSONDecodeError, AttributeError):
-                error_details = str(e)
             failures.append(
                 {
                     "email_address": email_address,
-                    "error": f"Failed to share: {error_details}",
+                    "error": sanitize_http_error(e, "Share spreadsheet"),
                 }
             )
 

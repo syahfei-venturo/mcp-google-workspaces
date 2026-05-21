@@ -1,6 +1,7 @@
 """Shared utility functions for all Google Workspace services."""
 
 import logging
+import re
 import time
 from functools import wraps
 from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
@@ -14,6 +15,22 @@ logger = logging.getLogger(__name__)
 # Validation helpers
 # ---------------------------------------------------------------------------
 
+# Google resource IDs: alphanumeric, hyphens, underscores (typically 44 chars).
+# Minimum 3 chars to reject empty/trivially-malformed input without being
+# overly strict (some test/dev environments use short IDs).
+_GOOGLE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{3,}$")
+
+# HTTP status → user-safe message map (no internal details leaked)
+_HTTP_ERROR_MESSAGES: Dict[int, str] = {
+    400: "Bad request — check your parameters",
+    401: "Authentication failed — re-authenticate and retry",
+    403: "Permission denied — check sharing settings",
+    404: "Resource not found — verify the ID exists",
+    429: "Rate limit exceeded — retry after a short wait",
+    500: "Google API internal error — retry later",
+    503: "Google API temporarily unavailable — retry later",
+}
+
 
 def validate_required_string(
     value: Optional[str], field_name: str
@@ -22,6 +39,33 @@ def validate_required_string(
     if not value or not value.strip():
         return {"error": f"{field_name} must be a non-empty string"}
     return None
+
+
+def validate_google_id(
+    value: Optional[str], field_name: str
+) -> Optional[Dict[str, str]]:
+    """Return an error dict if *value* is not a valid Google resource ID.
+
+    Google Sheets/Docs/Drive IDs are alphanumeric with hyphens and
+    underscores, typically 44 characters but at least 10.
+    """
+    if not value or not value.strip():
+        return {"error": f"{field_name} must be a non-empty string"}
+    if not _GOOGLE_ID_PATTERN.match(value.strip()):
+        return {"error": f"{field_name} contains invalid characters or is too short"}
+    return None
+
+
+def sanitize_http_error(error: HttpError, operation: str) -> str:
+    """Return a user-safe error message for an ``HttpError``.
+
+    Logs the full error detail for debugging while returning only the
+    HTTP status code and a generic message to the caller.
+    """
+    status = error.resp.status if hasattr(error, "resp") else 0
+    logger.error("%s failed (HTTP %d): %s", operation, status, error)
+    safe_msg = _HTTP_ERROR_MESSAGES.get(status, f"Unexpected error (HTTP {status})")
+    return f"{operation} failed: {safe_msg}"
 
 
 # ---------------------------------------------------------------------------

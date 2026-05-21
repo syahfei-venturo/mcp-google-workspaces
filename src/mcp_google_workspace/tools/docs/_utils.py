@@ -17,10 +17,13 @@ _BASE_DELAY = 2.0  # seconds; doubles each attempt → 2, 4, 8, 16, 32
 
 
 def validate_document_id(document_id: str) -> Optional[Dict[str, str]]:
-    """Return error dict if document_id is invalid, else None."""
-    if not document_id or not document_id.strip():
-        return {"error": "document_id must be a non-empty string"}
-    return None
+    """Return error dict if document_id is invalid, else None.
+
+    Google document IDs are alphanumeric with hyphens/underscores, typically 44 chars.
+    """
+    from ...utils.common import validate_google_id
+
+    return validate_google_id(document_id, "document_id")
 
 
 def pt(magnitude: float) -> Dict[str, Any]:

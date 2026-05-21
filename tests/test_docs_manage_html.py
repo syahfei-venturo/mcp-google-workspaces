@@ -181,7 +181,8 @@ class TestCreateDocumentFromHtmlErrors:
 
         result = create_document_from_html("Title", "<p>test</p>", ctx=ctx)
         assert "error" in result
-        assert "Quota exceeded" in result["error"]
+        # Error messages are sanitized — internal details not exposed
+        assert "unexpected error" in result["error"]
 
 
 # ---------------------------------------------------------------------------

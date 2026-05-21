@@ -41,6 +41,7 @@ TOKEN_PATH = os.environ.get(
 CREDENTIALS_PATH = os.environ.get("CREDENTIALS_PATH", "credentials.json")
 SERVICE_ACCOUNT_PATH = os.environ.get("SERVICE_ACCOUNT_PATH", "service_account.json")
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
+OAUTH_PORT = int(os.environ.get("OAUTH_PORT", "8085"))
 
 
 def _ensure_token_dir() -> None:
@@ -163,7 +164,7 @@ def _try_oauth() -> Optional[Any]:
 
     try:
         flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
-        creds = flow.run_local_server(port=8085)
+        creds = flow.run_local_server(port=OAUTH_PORT)
         _write_token(creds.to_json())
         logger.info("Successfully authenticated using OAuth flow")
         return creds
