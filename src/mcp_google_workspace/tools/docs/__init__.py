@@ -1,7 +1,7 @@
 """Tool registration for Google Docs operations."""
 
 from ...registry import ToolRegistry
-from . import comments, format, manage, markdown, read, smart_chips, table, tabs, write
+from . import comments, format, manage, read, smart_chips, table, tabs, write
 
 
 def register(registry: ToolRegistry) -> None:
@@ -11,7 +11,6 @@ def register(registry: ToolRegistry) -> None:
     format.register(registry)
     manage.register(registry)
     table.register(registry)
-    markdown.register(registry)
     comments.register(registry)
     tabs.register(registry)
     smart_chips.register(registry)

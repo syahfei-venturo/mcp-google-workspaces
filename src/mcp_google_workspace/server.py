@@ -148,7 +148,7 @@ search_tools("insert text document", category="docs")
 
 # Step 2: execute
 execute(\"\"\"
-insert_text(document_id="YOUR_DOC_ID", text="Hello World", index=1)
+insert_text_with_html(document_id="YOUR_DOC_ID", html_content="<p>Hello World</p>")
 \"\"\")
 ```
 

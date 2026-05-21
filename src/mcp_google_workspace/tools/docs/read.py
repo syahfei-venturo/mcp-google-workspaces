@@ -1,12 +1,16 @@
 """Read operations for Google Docs."""
 
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from googleapiclient.errors import HttpError
 from mcp.server.fastmcp import Context
 
 from ...registry import ToolParameter, ToolRegistry
 from ._utils import safe_get_document, validate_document_id
+
+logger = logging.getLogger(__name__)
 
 _VALID_MATCH_TYPES = {"contains", "exact", "regex", "starts_with"}
 _MAX_QUERY_LENGTH = 1000
@@ -125,28 +129,51 @@ def _text_range_to_doc_range(
     return doc_start, doc_end
 
 
-def get_document(
+def get_document_as_html(
     document_id: str,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
-    """Get the full structure and metadata of a Google Document."""
+    """Export a Google Document as HTML content.
+
+    Uses the Drive API to export the document as HTML, which preserves
+    rich formatting including headings, tables, lists, bold/italic,
+    links, and images.
+    """
     if err := validate_document_id(document_id):
         return err
 
-    docs_service = ctx.request_context.lifespan_context.docs_service
+    drive_service = ctx.request_context.lifespan_context.drive_service
 
-    doc = safe_get_document(docs_service, document_id)
-    if "error" in doc:
-        return doc
+    try:
+        # Get document title via Drive API
+        file_meta = (
+            drive_service.files()
+            .get(fileId=document_id, supportsAllDrives=True, fields="id, name")
+            .execute()
+        )
+    except HttpError as e:
+        logger.error("Google API error reading document %s: %s", document_id, e)
+        return {"error": f"Google API error reading document metadata: {e}"}
+
+    try:
+        html_bytes = (
+            drive_service.files()
+            .export(fileId=document_id, mimeType="text/html")
+            .execute()
+        )
+        html_content = html_bytes.decode("utf-8")
+    except HttpError as e:
+        logger.error("Google API error exporting document %s: %s", document_id, e)
+        return {"error": f"Google API error exporting document as HTML: {e}"}
+    except Exception as e:
+        logger.error("Failed to export document %s: %s", document_id, e)
+        return {"error": f"Failed to export document as HTML: {e}"}
 
     return {
-        "documentId": doc.get("documentId"),
-        "title": doc.get("title"),
-        "revisionId": doc.get("revisionId"),
-        "body": doc.get("body"),
-        "headers": doc.get("headers"),
-        "footers": doc.get("footers"),
-        "documentStyle": doc.get("documentStyle"),
+        "documentId": document_id,
+        "title": file_meta.get("name", ""),
+        "html": html_content,
+        "length": len(html_content),
     }
 
 
@@ -177,66 +204,62 @@ def get_text(
     }
 
 
-def get_tables(
+def get_tables_as_html(
     document_id: str,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
-    """Extract all tables from a Google Document with their content."""
+    """Extract all tables from a Google Document as HTML.
+
+    Exports the document as HTML via the Drive API, then extracts
+    all ``<table>`` elements and returns them as HTML strings.
+    """
     if err := validate_document_id(document_id):
         return err
 
-    docs_service = ctx.request_context.lifespan_context.docs_service
+    drive_service = ctx.request_context.lifespan_context.drive_service
 
-    doc = safe_get_document(docs_service, document_id)
-    if "error" in doc:
-        return doc
+    try:
+        file_meta = (
+            drive_service.files()
+            .get(fileId=document_id, supportsAllDrives=True, fields="id, name")
+            .execute()
+        )
+    except HttpError as e:
+        logger.error("Google API error reading document %s: %s", document_id, e)
+        return {"error": f"Google API error reading document metadata: {e}"}
 
-    body = doc.get("body", {})
-    content = body.get("content", [])
+    try:
+        html_bytes = (
+            drive_service.files()
+            .export(fileId=document_id, mimeType="text/html")
+            .execute()
+        )
+        html_content = html_bytes.decode("utf-8")
+    except HttpError as e:
+        logger.error("Google API error exporting document %s: %s", document_id, e)
+        return {"error": f"Google API error exporting document as HTML: {e}"}
+    except Exception as e:
+        logger.error("Failed to export document %s: %s", document_id, e)
+        return {"error": f"Failed to export document as HTML: {e}"}
+
+    # Extract <table> elements using regex
+    table_pattern = re.compile(
+        r"<table[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE
+    )
+    table_matches = table_pattern.findall(html_content)
 
     tables: List[Dict[str, Any]] = []
-    for idx, element in enumerate(content):
-        if "table" not in element:
-            continue
-
-        table = element["table"]
-        rows_data: List[List[str]] = []
-        cell_indices: List[List[Dict[str, Any]]] = []
-
-        for row in table.get("tableRows", []):
-            row_cells: List[str] = []
-            row_indices: List[Dict[str, Any]] = []
-            for cell in row.get("tableCells", []):
-                cell_content = cell.get("content", [])
-                cell_text = _extract_text_from_elements(cell_content).strip()
-                row_cells.append(cell_text)
-
-                # Extract per-cell content indices from structural elements
-                c_start = None
-                c_end = None
-                if cell_content:
-                    c_start = cell_content[0].get("startIndex")
-                    c_end = cell_content[-1].get("endIndex")
-                row_indices.append({"startIndex": c_start, "endIndex": c_end})
-
-            rows_data.append(row_cells)
-            cell_indices.append(row_indices)
-
+    for idx, table_html in enumerate(table_matches):
         tables.append(
             {
                 "tableIndex": idx,
-                "rows": table.get("rows", 0),
-                "columns": table.get("columns", 0),
-                "data": rows_data,
-                "startIndex": element.get("startIndex"),
-                "endIndex": element.get("endIndex"),
-                "cellIndices": cell_indices,
+                "html": table_html,
             }
         )
 
     return {
-        "documentId": doc.get("documentId"),
-        "title": doc.get("title"),
+        "documentId": document_id,
+        "title": file_meta.get("name", ""),
         "tableCount": len(tables),
         "tables": tables,
     }
@@ -451,10 +474,12 @@ def search_document(
 def register(registry: ToolRegistry) -> None:
     """Register all Docs read tools in the registry."""
     registry.register(
-        name="get_document",
+        name="get_document_as_html",
         description=(
-            "Get the full structure and metadata of a Google Document, "
-            "including body content, headers, footers, and styling."
+            "Export a Google Document as HTML content. "
+            "Returns the full document with rich formatting preserved "
+            "including headings, tables, lists, bold/italic, links, and images. "
+            "RECOMMENDED for reading document content."
         ),
         parameters=[
             ToolParameter(
@@ -463,8 +488,8 @@ def register(registry: ToolRegistry) -> None:
                 "The ID of the document (from URL)",
             ),
         ],
-        tags=["docs", "read", "document", "content", "structure", "get"],
-        fn=get_document,
+        tags=["docs", "read", "document", "content", "html", "export", "get"],
+        fn=get_document_as_html,
         read_only=True,
     )
 
@@ -487,10 +512,10 @@ def register(registry: ToolRegistry) -> None:
     )
 
     registry.register(
-        name="get_tables",
+        name="get_tables_as_html",
         description=(
-            "Extract all tables from a Google Document with their content, "
-            "dimensions, and positions."
+            "Extract all tables from a Google Document as HTML. "
+            "Returns each table as an HTML string with formatting preserved."
         ),
         parameters=[
             ToolParameter(
@@ -499,8 +524,8 @@ def register(registry: ToolRegistry) -> None:
                 "The ID of the document (from URL)",
             ),
         ],
-        tags=["docs", "read", "tables", "content", "extract", "data"],
-        fn=get_tables,
+        tags=["docs", "read", "tables", "content", "extract", "data", "html"],
+        fn=get_tables_as_html,
         read_only=True,
     )
 

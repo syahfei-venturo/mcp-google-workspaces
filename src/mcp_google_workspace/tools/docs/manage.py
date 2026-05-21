@@ -23,25 +23,40 @@ logger = logging.getLogger(__name__)
 MAX_HTML_BYTES = 5 * 1024 * 1024
 
 
-def create_document_from_html(
+def create_document(
     title: str,
-    html_content: str,
+    file_path: str,
     folder_id: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
-    """Create a new Google Document from HTML content.
+    """Create a new Google Document from a local HTML file.
 
-    Uses the Drive API media upload to convert HTML into a native
-    Google Document.  Supports rich formatting including headings,
-    tables, lists, bold/italic, links, and images.
+    Reads the HTML file at ``file_path`` and uses the Drive API media
+    upload to convert it into a native Google Document.  Supports rich
+    formatting including headings, tables, lists, bold/italic, links,
+    and images.
 
     This creates a **new** document — it cannot inject HTML into an
     existing document (Drive API limitation).
     """
     if not title or not title.strip():
         return {"error": "title must be a non-empty string"}
-    if not html_content or not html_content.strip():
-        return {"error": "html_content must be a non-empty string"}
+    if not file_path or not file_path.strip():
+        return {"error": "file_path must be a non-empty string"}
+
+    import os
+
+    if not os.path.isfile(file_path):
+        return {"error": f"File not found: {file_path}"}
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+    except OSError as e:
+        return {"error": f"Failed to read file: {e}"}
+
+    if not html_content.strip():
+        return {"error": "HTML file is empty"}
 
     html_bytes = html_content.encode("utf-8")
     if len(html_bytes) > MAX_HTML_BYTES:
@@ -211,44 +226,6 @@ def append_html(
         "status": "appended",
         "appendedLength": len(html_content),
     }
-
-
-def create_document(
-    title: str,
-    folder_id: Optional[str] = None,
-    ctx: Optional[Context] = None,
-) -> Dict[str, Any]:
-    """Create a new Google Document."""
-    if not title or not title.strip():
-        return {"error": "title must be a non-empty string"}
-
-    drive_service = ctx.request_context.lifespan_context.drive_service
-    target_folder_id = folder_id or ctx.request_context.lifespan_context.folder_id
-
-    file_body: Dict[str, Any] = {
-        "name": title,
-        "mimeType": "application/vnd.google-apps.document",
-    }
-    if target_folder_id:
-        file_body["parents"] = [target_folder_id]
-
-    try:
-        document, warning = drive_create_with_fallback(drive_service, file_body)
-    except HttpError as e:
-        return {"error": sanitize_http_error(e, "Create document")}
-    except Exception as e:
-        logger.error("Create document failed: %s", e)
-        return {"error": "Create document failed: unexpected error"}
-
-    parents = document.get("parents")
-    result: Dict[str, Any] = {
-        "documentId": document.get("id"),
-        "title": document.get("name", title),
-        "folder": parents[0] if parents else "root",
-    }
-    if warning:
-        result["warning"] = warning
-    return result
 
 
 def delete_document(
@@ -731,24 +708,8 @@ def register(registry: ToolRegistry) -> None:
     """Register all Docs management tools in the registry."""
     registry.register(
         name="create_document",
-        description="Create a new Google Document in the configured Drive folder.",
-        parameters=[
-            ToolParameter("title", "string", "Title for the new document"),
-            ToolParameter(
-                "folder_id",
-                "string",
-                "Drive folder ID. Uses default if omitted.",
-                required=False,
-            ),
-        ],
-        tags=["docs", "create", "document", "new", "drive"],
-        fn=create_document,
-    )
-
-    registry.register(
-        name="create_document_from_html",
         description=(
-            "Create a new Google Document from HTML content. "
+            "Create a new Google Document from a local HTML file. "
             "Supports rich formatting: headings, tables, lists, bold/italic, "
             "links, images. Creates a NEW document (cannot inject into existing). "
             "Use this instead of multiple insert/format calls for complex documents."
@@ -756,11 +717,11 @@ def register(registry: ToolRegistry) -> None:
         parameters=[
             ToolParameter("title", "string", "Title for the new document"),
             ToolParameter(
-                "html_content",
+                "file_path",
                 "string",
-                "HTML content to convert into the document. "
-                "Supports standard HTML tags: h1-h6, p, table, ul, ol, "
-                "li, b, i, a, img, br, hr, etc.",
+                "Path to a local HTML file to convert into the document. "
+                "The file must contain valid HTML with standard tags: "
+                "h1-h6, p, table, ul, ol, li, b, i, a, img, br, hr, etc.",
             ),
             ToolParameter(
                 "folder_id",
@@ -771,9 +732,9 @@ def register(registry: ToolRegistry) -> None:
         ],
         tags=[
             "docs", "create", "document", "html", "rich", "format",
-            "convert", "table", "report", "template", "drive",
+            "convert", "table", "report", "template", "drive", "file",
         ],
-        fn=create_document_from_html,
+        fn=create_document,
     )
 
     registry.register(

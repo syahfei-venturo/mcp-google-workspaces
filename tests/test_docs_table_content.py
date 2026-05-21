@@ -11,17 +11,12 @@ from mcp_google_workspace.tools.docs.read import (
     _extract_text_with_positions,
     _text_pos_to_doc_index,
     _text_range_to_doc_range,
-    get_tables,
     search_document,
 )
 from mcp_google_workspace.tools.docs.table import (
     _find_table_element,
     _get_cell_content_range,
     update_table_cell_content,
-)
-from mcp_google_workspace.tools.docs.write import (
-    replace_first_text,
-    replace_text_in_range,
 )
 
 
@@ -467,54 +462,6 @@ class TestUpdateTableCellContentApiError:
 
 
 # ---------------------------------------------------------------------------
-# get_tables — cell indices enhancement
-# ---------------------------------------------------------------------------
-
-
-class TestGetTablesCellIndices:
-    """get_tables should now include cellIndices."""
-
-    def test_returns_cell_indices(self):
-        svc = MagicMock()
-        svc.documents().get().execute.return_value = _doc_with_table()
-        ctx = _mock_ctx(docs_service=svc)
-
-        result = get_tables("doc123", ctx=ctx)
-        assert result["tableCount"] == 1
-
-        table = result["tables"][0]
-        assert "cellIndices" in table
-        assert len(table["cellIndices"]) == 2  # 2 rows
-        assert len(table["cellIndices"][0]) == 2  # 2 columns
-
-        # Each cell index entry should have startIndex/endIndex
-        cell_00 = table["cellIndices"][0][0]
-        assert cell_00["startIndex"] is not None
-        assert cell_00["endIndex"] is not None
-        assert cell_00["startIndex"] > 13  # Inside table
-
-    def test_cell_indices_match_actual_content(self):
-        """cellIndices should match the actual cell content positions."""
-        svc = MagicMock()
-        doc = _doc_with_table()
-        svc.documents().get().execute.return_value = doc
-        ctx = _mock_ctx(docs_service=svc)
-
-        result = get_tables("doc123", ctx=ctx)
-        table = result["tables"][0]
-
-        # Verify against raw document structure
-        table_elem = doc["body"]["content"][1]
-        for r, row in enumerate(table_elem["table"]["tableRows"]):
-            for c, cell in enumerate(row["tableCells"]):
-                expected_start = cell["content"][0].get("startIndex")
-                expected_end = cell["content"][-1].get("endIndex")
-                actual = table["cellIndices"][r][c]
-                assert actual["startIndex"] == expected_start
-                assert actual["endIndex"] == expected_end
-
-
-# ---------------------------------------------------------------------------
 # search_document — documentIndex enhancement
 # ---------------------------------------------------------------------------
 
@@ -554,86 +501,3 @@ class TestSearchDocumentIndex:
         assert match["position"] != match["documentIndex"]
 
 
-# ---------------------------------------------------------------------------
-# replace_first_text — table-safe fix
-# ---------------------------------------------------------------------------
-
-
-class TestReplaceFirstTextTableSafe:
-    """replace_first_text should use correct indices for table content."""
-
-    def test_replace_in_paragraph_still_works(self):
-        svc = MagicMock()
-        svc.documents().get().execute.return_value = _doc_with_table()
-        svc.documents().batchUpdate().execute.return_value = _batch_ok()
-        ctx = _mock_ctx(docs_service=svc)
-
-        result = replace_first_text("doc123", "Hello", "Hi", ctx=ctx)
-        assert result["replacedAt"] == 1  # Correct doc index
-
-    def test_replace_in_table_uses_mapped_indices(self):
-        """CRITICAL: replacing text in a table cell must target correct indices."""
-        svc = MagicMock()
-        svc.documents().get().execute.return_value = _doc_with_table()
-        svc.documents().batchUpdate().execute.return_value = _batch_ok()
-        ctx = _mock_ctx(docs_service=svc)
-
-        result = replace_first_text("doc123", "Cell A", "Alpha", ctx=ctx)
-
-        # replacedAt must be inside the table (>13), not 1 + text_offset
-        assert result["replacedAt"] > 13
-
-        # Verify the batchUpdate request uses correct indices
-        body = svc.documents().batchUpdate.call_args
-        requests = body.kwargs.get("body", body[1].get("body", {})).get(
-            "requests", []
-        )
-
-        delete_req = [r for r in requests if "deleteContentRange" in r][0]
-        rng = delete_req["deleteContentRange"]["range"]
-        assert rng["startIndex"] > 13
-        assert rng["endIndex"] > 13
-
-
-# ---------------------------------------------------------------------------
-# replace_text_in_range — table-safe fix
-# ---------------------------------------------------------------------------
-
-
-class TestReplaceTextInRangeTableSafe:
-    """replace_text_in_range should use mapped document indices."""
-
-    def test_replace_in_table_range(self):
-        """Replace within a table's index range should work."""
-        svc = MagicMock()
-        doc = _doc_with_table()
-        svc.documents().get().execute.return_value = doc
-        svc.documents().batchUpdate().execute.return_value = _batch_ok()
-        ctx = _mock_ctx(docs_service=svc)
-
-        # Use the table's actual index range
-        table_start = doc["body"]["content"][1]["startIndex"]
-        table_end = doc["body"]["content"][1]["endIndex"]
-
-        result = replace_text_in_range(
-            "doc123", "Cell A", "Alpha",
-            start_index=table_start, end_index=table_end, ctx=ctx,
-        )
-
-        assert result["occurrencesReplaced"] == 1
-
-    def test_range_excludes_matches_outside(self):
-        """Matches outside the specified range should not be replaced."""
-        svc = MagicMock()
-        doc = _doc_with_table()
-        svc.documents().get().execute.return_value = doc
-        svc.documents().batchUpdate().execute.return_value = _batch_ok()
-        ctx = _mock_ctx(docs_service=svc)
-
-        # Use range that only covers the paragraph before the table
-        result = replace_text_in_range(
-            "doc123", "Cell A", "Alpha",
-            start_index=1, end_index=13, ctx=ctx,
-        )
-
-        assert result["occurrencesReplaced"] == 0

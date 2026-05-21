@@ -689,7 +689,7 @@ def create_footnote(
 ) -> Dict[str, Any]:
     """Create a footnote at the specified position.
 
-    After creation, use insert_text with the footnote's content
+    After creation, use insert_text_with_html with the footnote's content
     index to add text to it.
     """
     if err := validate_document_id(document_id):
@@ -737,7 +737,7 @@ def replace_image(
     """Replace an existing image in the document with a new one.
 
     ``image_object_id`` can be found in the document structure
-    returned by ``get_document``.
+    returned by ``get_document_as_html``.
     """
     if err := validate_document_id(document_id):
         return err
@@ -787,7 +787,7 @@ def delete_positioned_object(
     """Delete a positioned (floating) object from the document.
 
     Positioned objects include floating images and other anchored
-    elements.  Use ``get_document`` to find object IDs in the
+    elements.  Use ``get_document_as_html`` to find object IDs in the
     ``positionedObjects`` field.
     """
     if err := validate_document_id(document_id):
@@ -1516,7 +1516,7 @@ def register(registry: ToolRegistry) -> None:
         name="create_footnote",
         description=(
             "Create a footnote at a position. Returns the footnote ID. "
-            "Use insert_text with the footnote content index to add text."
+            "Use insert_text_with_html with the footnote content index to add text."
         ),
         parameters=[
             ToolParameter(
@@ -1540,7 +1540,7 @@ def register(registry: ToolRegistry) -> None:
         name="replace_image",
         description=(
             "Replace an existing image in the document with a new one "
-            "from an HTTPS URL. Use get_document to find image object IDs."
+            "from an HTTPS URL. Use get_document_as_html to find image object IDs."
         ),
         parameters=[
             ToolParameter(
@@ -1551,7 +1551,7 @@ def register(registry: ToolRegistry) -> None:
             ToolParameter(
                 "image_object_id",
                 "string",
-                "The object ID of the image to replace (from get_document)",
+                "The object ID of the image to replace (from get_document_as_html)",
             ),
             ToolParameter(
                 "uri",
@@ -1574,7 +1574,7 @@ def register(registry: ToolRegistry) -> None:
         name="delete_positioned_object",
         description=(
             "Delete a positioned (floating) object from the document. "
-            "Use get_document to find object IDs in positionedObjects."
+            "Use get_document_as_html to find object IDs in positionedObjects."
         ),
         parameters=[
             ToolParameter(

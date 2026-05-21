@@ -1,17 +1,19 @@
 """Tests for Google Docs tool functions with mocked API services."""
 
+import os
+import tempfile
 from unittest.mock import MagicMock
 
 from mcp_google_workspace.tools.docs.read import (
-    get_document,
-    get_tables,
+    get_document_as_html,
+    get_tables_as_html,
     get_text,
     search_document,
 )
 from mcp_google_workspace.tools.docs.write import (
     delete_content,
-    insert_text,
-    replace_text,
+    insert_text_with_html,
+    replace_text_with_html,
     update_formatting,
 )
 from mcp_google_workspace.tools.docs.manage import (
@@ -61,18 +63,19 @@ def _sample_doc(title="Test Doc", text="Hello World"):
 # --- Read tests ---
 
 
-class TestGetDocument:
-    """Tests for get_document."""
+class TestGetDocumentAsHtml:
+    """Tests for get_document_as_html."""
 
-    def test_returns_structure(self):
-        svc = MagicMock()
-        svc.documents().get().execute.return_value = _sample_doc()
-        ctx = _mock_ctx(docs_service=svc)
+    def test_returns_html(self):
+        drive = MagicMock()
+        drive.files().get().execute.return_value = {"id": "doc123", "name": "Test Doc"}
+        drive.files().export().execute.return_value = b"<html><body><p>Hello</p></body></html>"
+        ctx = _mock_ctx(drive_service=drive)
 
-        result = get_document("doc123", ctx=ctx)
+        result = get_document_as_html("doc123", ctx=ctx)
         assert result["documentId"] == "doc123"
         assert result["title"] == "Test Doc"
-        assert "body" in result
+        assert "<p>Hello</p>" in result["html"]
 
 
 class TestGetText:
@@ -88,110 +91,28 @@ class TestGetText:
         assert result["length"] == 11
 
 
-class TestGetTables:
-    """Tests for get_tables."""
+class TestGetTablesAsHtml:
+    """Tests for get_tables_as_html."""
 
     def test_extracts_tables(self):
-        doc = {
-            "documentId": "doc123",
-            "title": "Table Doc",
-            "body": {
-                "content": [
-                    {
-                        "table": {
-                            "rows": 2,
-                            "columns": 2,
-                            "tableRows": [
-                                {
-                                    "tableCells": [
-                                        {
-                                            "content": [
-                                                {
-                                                    "paragraph": {
-                                                        "elements": [
-                                                            {
-                                                                "textRun": {
-                                                                    "content": "A"
-                                                                }
-                                                            }
-                                                        ]
-                                                    }
-                                                }
-                                            ]
-                                        },
-                                        {
-                                            "content": [
-                                                {
-                                                    "paragraph": {
-                                                        "elements": [
-                                                            {
-                                                                "textRun": {
-                                                                    "content": "B"
-                                                                }
-                                                            }
-                                                        ]
-                                                    }
-                                                }
-                                            ]
-                                        },
-                                    ]
-                                },
-                                {
-                                    "tableCells": [
-                                        {
-                                            "content": [
-                                                {
-                                                    "paragraph": {
-                                                        "elements": [
-                                                            {
-                                                                "textRun": {
-                                                                    "content": "C"
-                                                                }
-                                                            }
-                                                        ]
-                                                    }
-                                                }
-                                            ]
-                                        },
-                                        {
-                                            "content": [
-                                                {
-                                                    "paragraph": {
-                                                        "elements": [
-                                                            {
-                                                                "textRun": {
-                                                                    "content": "D"
-                                                                }
-                                                            }
-                                                        ]
-                                                    }
-                                                }
-                                            ]
-                                        },
-                                    ]
-                                },
-                            ],
-                        },
-                        "startIndex": 1,
-                        "endIndex": 50,
-                    }
-                ]
-            },
-        }
-        svc = MagicMock()
-        svc.documents().get().execute.return_value = doc
-        ctx = _mock_ctx(docs_service=svc)
+        html = b"<html><body><table><tr><td>A</td><td>B</td></tr></table></body></html>"
+        drive = MagicMock()
+        drive.files().get().execute.return_value = {"id": "doc123", "name": "Table Doc"}
+        drive.files().export().execute.return_value = html
+        ctx = _mock_ctx(drive_service=drive)
 
-        result = get_tables("doc123", ctx=ctx)
+        result = get_tables_as_html("doc123", ctx=ctx)
         assert result["tableCount"] == 1
-        assert result["tables"][0]["data"] == [["A", "B"], ["C", "D"]]
+        assert "<table>" in result["tables"][0]["html"]
 
     def test_no_tables(self):
-        svc = MagicMock()
-        svc.documents().get().execute.return_value = _sample_doc()
-        ctx = _mock_ctx(docs_service=svc)
+        html = b"<html><body><p>No tables here</p></body></html>"
+        drive = MagicMock()
+        drive.files().get().execute.return_value = {"id": "doc123", "name": "No Table"}
+        drive.files().export().execute.return_value = html
+        ctx = _mock_ctx(drive_service=drive)
 
-        result = get_tables("doc123", ctx=ctx)
+        result = get_tables_as_html("doc123", ctx=ctx)
         assert result["tableCount"] == 0
         assert result["tables"] == []
 
@@ -230,7 +151,6 @@ class TestSearchDocument:
     def test_match_type_exact(self):
         """exact: matches only standalone occurrences equal to query."""
         svc = MagicMock()
-        # Words separated by spaces: "cat" exact should NOT match "category"
         svc.documents().get().execute.return_value = _sample_doc(
             text="The cat sat on the category mat"
         )
@@ -239,7 +159,6 @@ class TestSearchDocument:
         result = search_document(
             "doc123", "cat", match_type="exact", ctx=ctx
         )
-        # "cat" as whole word, not "category"
         assert result["matchCount"] == 1
         assert result["matches"][0]["match"] == "cat"
 
@@ -306,7 +225,6 @@ class TestSearchDocument:
         result = search_document(
             "doc123", "pre", match_type="starts_with", ctx=ctx
         )
-        # "preview", "preorder" start with "pre"; "repress", "expression" do not
         assert result["matchCount"] == 2
 
     def test_match_type_invalid(self):
@@ -361,7 +279,6 @@ class TestSearchDocument:
     def test_context_does_not_cut_words(self):
         """Context should extend to word boundaries, not cut mid-word."""
         svc = MagicMock()
-        # Build text where 50-char boundary falls mid-word "extraordinarily"
         words = "the quick brown fox jumps over the lazy dog and extraordinarily "
         text = words + "target rest of text here"
         svc.documents().get().execute.return_value = _sample_doc(text=text)
@@ -370,27 +287,31 @@ class TestSearchDocument:
         result = search_document("doc123", "target", ctx=ctx)
         assert result["matchCount"] == 1
         context = result["matches"][0]["context"]
-        # Context should start at a word boundary, not mid-"extraordinarily"
         first_word = context.split()[0]
-        # The first word in context should be a complete word from the text
         assert first_word in text
 
 
 # --- Write tests ---
 
 
-class TestInsertText:
-    """Tests for insert_text."""
+class TestInsertTextWithHtml:
+    """Tests for insert_text_with_html."""
 
-    def test_inserts_at_index(self):
-        svc = MagicMock()
-        svc.documents().batchUpdate().execute.return_value = {"replies": []}
-        ctx = _mock_ctx(docs_service=svc)
+    def test_inserts_at_end(self):
+        drive = MagicMock()
+        drive.files().get().execute.return_value = {"id": "doc123", "name": "Test"}
+        drive.files().export().execute.return_value = b"<html><body><p>Hello</p></body></html>"
+        drive.files().update().execute.return_value = {"id": "doc123"}
+        ctx = _mock_ctx(drive_service=drive)
 
-        result = insert_text("doc123", "New text", index=5, ctx=ctx)
+        result = insert_text_with_html("doc123", "<p>World</p>", position="end", ctx=ctx)
         assert result["documentId"] == "doc123"
-        assert result["insertedAt"] == 5
-        assert result["textLength"] == 8
+        assert result["status"] == "inserted"
+
+    def test_invalid_position(self):
+        ctx = _mock_ctx()
+        result = insert_text_with_html("doc123", "<p>test</p>", position="middle", ctx=ctx)
+        assert "error" in result
 
 
 class TestDeleteContent:
@@ -410,18 +331,28 @@ class TestDeleteContent:
         assert "error" in result
 
 
-class TestReplaceText:
-    """Tests for replace_text."""
+class TestReplaceTextWithHtml:
+    """Tests for replace_text_with_html."""
 
     def test_replaces_all(self):
-        svc = MagicMock()
-        svc.documents().batchUpdate().execute.return_value = {
-            "replies": [{"replaceAllText": {"occurrencesChanged": 3}}]
-        }
-        ctx = _mock_ctx(docs_service=svc)
+        drive = MagicMock()
+        drive.files().get().execute.return_value = {"id": "doc123", "name": "Test"}
+        drive.files().export().execute.return_value = b"<html><body><p>old text old text</p></body></html>"
+        drive.files().update().execute.return_value = {"id": "doc123"}
+        ctx = _mock_ctx(drive_service=drive)
 
-        result = replace_text("doc123", "old", "new", ctx=ctx)
-        assert result["occurrencesChanged"] == 3
+        result = replace_text_with_html("doc123", "old", "<b>new</b>", ctx=ctx)
+        assert result["occurrencesChanged"] == 2
+        assert result["status"] == "replaced"
+
+    def test_no_match(self):
+        drive = MagicMock()
+        drive.files().get().execute.return_value = {"id": "doc123", "name": "Test"}
+        drive.files().export().execute.return_value = b"<html><body><p>hello</p></body></html>"
+        ctx = _mock_ctx(drive_service=drive)
+
+        result = replace_text_with_html("doc123", "xyz", "<b>new</b>", ctx=ctx)
+        assert result["occurrencesChanged"] == 0
 
 
 class TestUpdateFormatting:
@@ -450,9 +381,9 @@ class TestUpdateFormatting:
 
 
 class TestCreateDocument:
-    """Tests for create_document."""
+    """Tests for create_document (file_path based)."""
 
-    def test_creates_with_title(self):
+    def test_creates_from_html_file(self):
         drive = MagicMock()
         drive.files().create().execute.return_value = {
             "id": "new_doc_id",
@@ -461,9 +392,30 @@ class TestCreateDocument:
         }
         ctx = _mock_ctx(drive_service=drive)
 
-        result = create_document("My Document", ctx=ctx)
-        assert result["documentId"] == "new_doc_id"
-        assert result["title"] == "My Document"
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("<h1>Hello</h1><p>World</p>")
+            f.flush()
+            tmp_path = f.name
+
+        try:
+            result = create_document("My Document", tmp_path, ctx=ctx)
+            assert result["documentId"] == "new_doc_id"
+            assert result["title"] == "My Document"
+        finally:
+            os.unlink(tmp_path)
+
+    def test_file_not_found(self):
+        ctx = _mock_ctx()
+        result = create_document("Title", "/nonexistent/file.html", ctx=ctx)
+        assert "error" in result
+        assert "not found" in result["error"].lower()
+
+    def test_empty_file_path(self):
+        ctx = _mock_ctx()
+        result = create_document("Title", "", ctx=ctx)
+        assert "error" in result
 
 
 class TestDeleteDocument:

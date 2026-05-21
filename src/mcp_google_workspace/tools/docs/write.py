@@ -1,70 +1,174 @@
-"""Write operations for Google Docs."""
+"""Write operations for Google Docs (HTML-based).
 
+All write tools use the Drive API export→modify→upload pattern:
+1. Export document as HTML via Drive API
+2. Modify the HTML string
+3. Re-upload via Drive API media update
+
+This preserves document ID, sharing settings, and comments.
+"""
+
+import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaInMemoryUpload
 from mcp.server.fastmcp import Context
 
 from ...registry import ToolParameter, ToolRegistry
-from ._utils import safe_batch_update, validate_document_id
-from .read import (
-    _extract_paragraph_text,
-    _extract_text_with_positions,
-    _text_range_to_doc_range,
-)
+from ...utils.common import sanitize_http_error
+from ._utils import validate_document_id
+
+logger = logging.getLogger(__name__)
+
+# Maximum HTML content size (5 MB)
+MAX_HTML_BYTES = 5 * 1024 * 1024
 
 
-def insert_text(
+def _export_html(drive_service, document_id: str) -> tuple:
+    """Export a document as HTML. Returns (html_str, file_meta, error_dict).
+
+    On success error_dict is None. On failure html_str and file_meta are None.
+    """
+    try:
+        file_meta = (
+            drive_service.files()
+            .get(fileId=document_id, supportsAllDrives=True, fields="id, name")
+            .execute()
+        )
+    except HttpError as e:
+        return None, None, {"error": sanitize_http_error(e, "Get document metadata")}
+    except Exception as e:
+        logger.error("Get document metadata failed: %s", e)
+        return None, None, {"error": f"Get document metadata failed: {e}"}
+
+    try:
+        html_bytes = (
+            drive_service.files()
+            .export(fileId=document_id, mimeType="text/html")
+            .execute()
+        )
+        return html_bytes.decode("utf-8"), file_meta, None
+    except HttpError as e:
+        return None, None, {"error": sanitize_http_error(e, "Export document as HTML")}
+    except Exception as e:
+        logger.error("Export document as HTML failed: %s", e)
+        return None, None, {"error": "Export document as HTML failed: unexpected error"}
+
+
+def _upload_html(drive_service, document_id: str, html_content: str) -> Optional[Dict[str, Any]]:
+    """Re-upload modified HTML to overwrite the document. Returns error dict or None."""
+    html_bytes = html_content.encode("utf-8")
+    if len(html_bytes) > MAX_HTML_BYTES:
+        return {
+            "error": (
+                f"HTML content exceeds maximum size "
+                f"({len(html_bytes):,} bytes > {MAX_HTML_BYTES:,} bytes)"
+            )
+        }
+
+    media = MediaInMemoryUpload(html_bytes, mimetype="text/html")
+
+    try:
+        drive_service.files().update(
+            fileId=document_id,
+            media_body=media,
+            supportsAllDrives=True,
+            fields="id",
+        ).execute()
+        return None
+    except HttpError as e:
+        return {"error": sanitize_http_error(e, "Update document")}
+    except Exception as e:
+        logger.error("Update document failed: %s", e)
+        return {"error": "Update document failed: unexpected error"}
+
+
+def _strip_html_tags(html: str) -> str:
+    """Strip HTML tags to get plain text (for text-based searching)."""
+    return re.sub(r"<[^>]+>", "", html)
+
+
+# ---------------------------------------------------------------------------
+# Tool functions
+# ---------------------------------------------------------------------------
+
+
+def insert_text_with_html(
     document_id: str,
-    text: str,
-    index: Optional[int] = None,
-    segment_id: Optional[str] = None,
+    html_content: str,
+    position: str = "end",
+    after_text: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
-    """Insert text at a specific position in a Google Document.
+    """Insert HTML content into a Google Document.
 
-    For body text, index 1 is the beginning of the document body (default).
-    For headers/footers, pass the segment ID via ``segment_id`` — the default
-    index is automatically set to 0 (start of the segment) so that inserting
-    into a freshly created, empty header or footer works without manually
-    specifying the index.
-
-    Use ``segment_id`` to insert into a header or footer
-    (pass the header/footer ID from ``create_header``/``create_footer``).
+    ``position`` controls where the content is inserted:
+    - ``"end"``: append to the end of the document (default)
+    - ``"beginning"``: insert at the start of the document body
+    - ``"after_text"``: insert after the first occurrence of ``after_text``
     """
     if err := validate_document_id(document_id):
         return err
+    if not html_content or not html_content.strip():
+        return {"error": "html_content must be a non-empty string"}
+    if position not in ("beginning", "end", "after_text"):
+        return {"error": "position must be 'beginning', 'end', or 'after_text'"}
+    if position == "after_text" and (not after_text or not after_text.strip()):
+        return {"error": "after_text must be provided when position is 'after_text'"}
 
-    # Auto-select the correct default index:
-    # - Segments (header/footer) start at 0 in their own coordinate space.
-    # - The document body starts at 1.
-    resolved_index = index if index is not None else (0 if segment_id else 1)
+    drive_service = ctx.request_context.lifespan_context.drive_service
 
-    docs_service = ctx.request_context.lifespan_context.docs_service
+    current_html, file_meta, err = _export_html(drive_service, document_id)
+    if err:
+        return err
 
-    location: Dict[str, Any] = {"index": resolved_index}
-    if segment_id:
-        location["segmentId"] = segment_id
-
-    requests = [
-        {
-            "insertText": {
-                "location": location,
-                "text": text,
+    if position == "end":
+        # Insert before </body>
+        match = re.search(r"</body>", current_html, re.IGNORECASE)
+        if match:
+            insert_pos = match.start()
+            combined = current_html[:insert_pos] + html_content + current_html[insert_pos:]
+        else:
+            combined = current_html + html_content
+    elif position == "beginning":
+        # Insert after <body...>
+        match = re.search(r"<body[^>]*>", current_html, re.IGNORECASE)
+        if match:
+            insert_pos = match.end()
+            combined = current_html[:insert_pos] + html_content + current_html[insert_pos:]
+        else:
+            combined = html_content + current_html
+    else:
+        # after_text: find the text in HTML and insert after it
+        # Search for after_text in the HTML content (as literal text within tags)
+        escaped = re.escape(after_text)
+        match = re.search(escaped, current_html)
+        if not match:
+            return {
+                "documentId": document_id,
+                "title": file_meta.get("name", ""),
+                "error": f"Text '{after_text}' not found in document HTML",
             }
-        }
-    ]
+        # Find the end of the enclosing tag after the match
+        insert_pos = match.end()
+        # Try to find the closing tag boundary
+        close_tag = re.search(r"</[^>]+>", current_html[insert_pos:])
+        if close_tag:
+            insert_pos += close_tag.end()
+        combined = current_html[:insert_pos] + html_content + current_html[insert_pos:]
 
-    result = safe_batch_update(docs_service, document_id, requests)
-    if "error" in result:
-        return result
+    upload_err = _upload_html(drive_service, document_id, combined)
+    if upload_err:
+        return upload_err
 
     return {
         "documentId": document_id,
-        "insertedAt": resolved_index,
-        "segmentId": segment_id,
-        "textLength": len(text),
-        "replies": result.get("replies", []),
+        "title": file_meta.get("name", ""),
+        "position": position,
+        "insertedLength": len(html_content),
+        "status": "inserted",
     }
 
 
@@ -74,9 +178,14 @@ def delete_content(
     end_index: int,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
-    """Delete content within a specified index range in a Google Document."""
+    """Delete content within a specified index range in a Google Document.
+
+    Uses the Docs API batchUpdate for precise index-based deletion.
+    """
     if err := validate_document_id(document_id):
         return err
+
+    from ._utils import safe_batch_update
 
     docs_service = ctx.request_context.lifespan_context.docs_service
 
@@ -105,47 +214,55 @@ def delete_content(
     }
 
 
-def replace_text(
+def replace_text_with_html(
     document_id: str,
     find_text: str,
-    replacement: str,
+    replacement_html: str,
     match_case: bool = False,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
-    """Find and replace all occurrences of text in a Google Document."""
+    """Find text and replace all occurrences with HTML content.
+
+    Exports the document as HTML, performs find-and-replace on the
+    HTML content, and re-uploads. The ``find_text`` is searched as
+    literal text within the HTML. The ``replacement_html`` can contain
+    any valid HTML tags for rich formatting.
+    """
     if err := validate_document_id(document_id):
         return err
     if not find_text:
         return {"error": "find_text must be a non-empty string"}
 
-    docs_service = ctx.request_context.lifespan_context.docs_service
+    drive_service = ctx.request_context.lifespan_context.drive_service
 
-    requests = [
-        {
-            "replaceAllText": {
-                "containsText": {
-                    "text": find_text,
-                    "matchCase": match_case,
-                },
-                "replaceText": replacement,
-            }
+    current_html, file_meta, err = _export_html(drive_service, document_id)
+    if err:
+        return err
+
+    flags = 0 if match_case else re.IGNORECASE
+    pattern = re.compile(re.escape(find_text), flags)
+    occurrences = len(pattern.findall(current_html))
+
+    if occurrences == 0:
+        return {
+            "documentId": document_id,
+            "title": file_meta.get("name", ""),
+            "findText": find_text,
+            "occurrencesChanged": 0,
         }
-    ]
 
-    result = safe_batch_update(docs_service, document_id, requests)
-    if "error" in result:
-        return result
+    combined = pattern.sub(replacement_html, current_html)
 
-    occurrences = 0
-    for reply in result.get("replies", []):
-        replace_reply = reply.get("replaceAllText", {})
-        occurrences = replace_reply.get("occurrencesChanged", 0)
+    upload_err = _upload_html(drive_service, document_id, combined)
+    if upload_err:
+        return upload_err
 
     return {
         "documentId": document_id,
+        "title": file_meta.get("name", ""),
         "findText": find_text,
-        "replacement": replacement,
         "occurrencesChanged": occurrences,
+        "status": "replaced",
     }
 
 
@@ -171,6 +288,8 @@ def update_formatting(
 
     if start_index >= end_index:
         return {"error": "start_index must be less than end_index"}
+
+    from ._utils import safe_batch_update
 
     docs_service = ctx.request_context.lifespan_context.docs_service
 
@@ -224,34 +343,17 @@ def update_formatting(
     }
 
 
-def _find_occurrences(
-    full_text: str,
-    find_text: str,
-    match_case: bool,
-) -> List[re.Match]:
-    """Find all occurrences of find_text in full_text, returning Match objects."""
-    flags = re.UNICODE | (0 if match_case else re.IGNORECASE)
-    pattern = re.compile(re.escape(find_text), flags)
-    return list(pattern.finditer(full_text))
-
-
-
-def replace_first_text(
+def replace_first_text_with_html(
     document_id: str,
     find_text: str,
-    replacement: str,
+    replacement_html: str,
     match_case: bool = False,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
-    """Replace only the first occurrence of text in a Google Document.
+    """Replace only the first occurrence of text with HTML content.
 
-    Unlike ``replace_text`` which replaces *all* occurrences via the
-    ``replaceAllText`` API, this function reads the document, locates
-    the first match, and performs an atomic delete+insert via
-    ``batchUpdate``.
-
-    .. warning:: Not safe for concurrent edits — another user may change
-       the document between the read and the write.
+    Exports the document as HTML, finds the first match, replaces it
+    with ``replacement_html``, and re-uploads.
     """
     if err := validate_document_id(document_id):
         return err
@@ -260,80 +362,56 @@ def replace_first_text(
     if not find_text.strip():
         return {"error": "find_text must contain non-whitespace characters"}
 
-    docs_service = ctx.request_context.lifespan_context.docs_service
+    drive_service = ctx.request_context.lifespan_context.drive_service
 
-    doc = docs_service.documents().get(documentId=document_id).execute()
-    body = doc.get("body", {})
-    content = body.get("content", [])
-    full_text, segments = _extract_text_with_positions(content)
+    current_html, file_meta, err = _export_html(drive_service, document_id)
+    if err:
+        return err
 
-    matches = _find_occurrences(full_text, find_text, match_case)
+    flags = 0 if match_case else re.IGNORECASE
+    pattern = re.compile(re.escape(find_text), flags)
 
-    if not matches:
+    match = pattern.search(current_html)
+    if not match:
         return {
             "documentId": document_id,
-            "title": doc.get("title"),
+            "title": file_meta.get("name", ""),
             "findText": find_text,
             "occurrencesFound": 0,
         }
 
-    first = matches[0]
-    doc_start, doc_end = _text_range_to_doc_range(
-        segments, first.start(), first.end()
-    )
-    if doc_start is None or doc_end is None:
-        return {
-            "error": (
-                "Cannot map match position to document indices. "
-                "The match may span across structural boundaries."
-            )
-        }
+    total_matches = len(pattern.findall(current_html))
 
-    requests: List[Dict[str, Any]] = [
-        {
-            "deleteContentRange": {
-                "range": {"startIndex": doc_start, "endIndex": doc_end}
-            }
-        }
-    ]
-    if replacement:
-        requests.append(
-            {"insertText": {"location": {"index": doc_start}, "text": replacement}}
-        )
+    # Replace only the first occurrence
+    combined = current_html[:match.start()] + replacement_html + current_html[match.end():]
 
-    result = safe_batch_update(docs_service, document_id, requests)
-    if "error" in result:
-        return result
+    upload_err = _upload_html(drive_service, document_id, combined)
+    if upload_err:
+        return upload_err
 
     return {
         "documentId": document_id,
-        "title": doc.get("title"),
+        "title": file_meta.get("name", ""),
         "findText": find_text,
-        "replacement": replacement,
-        "replacedAt": doc_start,
-        "occurrencesFound": len(matches),
+        "occurrencesFound": total_matches,
+        "status": "replaced_first",
     }
 
 
-def replace_text_in_range(
+def replace_text_in_range_with_html(
     document_id: str,
     find_text: str,
-    replacement: str,
-    start_index: int,
-    end_index: int,
+    replacement_html: str,
+    range_start_text: str,
+    range_end_text: str,
     match_case: bool = False,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
-    """Replace all occurrences of text within a specific index range.
+    """Replace all occurrences of text within a text-bounded range with HTML.
 
-    Only matches whose *entire* span falls within ``[start_index, end_index)``
-    are replaced.  Matches partially overlapping the range boundary are
-    excluded.
-
-    All replacements are applied in a single atomic ``batchUpdate`` call,
-    processed in reverse order to preserve earlier indices.
-
-    .. warning:: Not safe for concurrent edits.
+    Instead of numeric indices, this tool uses ``range_start_text`` and
+    ``range_end_text`` to define the search boundary within the HTML.
+    Only matches within the bounded region are replaced.
     """
     if err := validate_document_id(document_id):
         return err
@@ -341,106 +419,83 @@ def replace_text_in_range(
         return {"error": "find_text must not be empty"}
     if not find_text.strip():
         return {"error": "find_text must contain non-whitespace characters"}
-    if start_index < 0:
-        return {"error": "start_index must be >= 0"}
-    if start_index >= end_index:
-        return {"error": "start_index must be less than end_index"}
+    if not range_start_text or not range_start_text.strip():
+        return {"error": "range_start_text must be a non-empty string"}
+    if not range_end_text or not range_end_text.strip():
+        return {"error": "range_end_text must be a non-empty string"}
 
-    docs_service = ctx.request_context.lifespan_context.docs_service
+    drive_service = ctx.request_context.lifespan_context.drive_service
 
-    doc = docs_service.documents().get(documentId=document_id).execute()
-    body = doc.get("body", {})
-    content = body.get("content", [])
-    full_text, segments = _extract_text_with_positions(content)
+    current_html, file_meta, err = _export_html(drive_service, document_id)
+    if err:
+        return err
 
-    all_matches = _find_occurrences(full_text, find_text, match_case)
+    flags = 0 if match_case else re.IGNORECASE
 
-    # Map each match to actual document indices, then filter by range
-    mapped: List[tuple] = []  # (doc_start, doc_end, match)
-    for m in all_matches:
-        ds, de = _text_range_to_doc_range(segments, m.start(), m.end())
-        if ds is not None and de is not None:
-            mapped.append((ds, de, m))
-
-    in_range = [
-        (ds, de, m)
-        for ds, de, m in mapped
-        if ds >= start_index and de <= end_index
-    ]
-
-    if not in_range:
+    # Find the range boundaries in HTML
+    start_match = re.search(re.escape(range_start_text), current_html, flags)
+    if not start_match:
         return {
             "documentId": document_id,
-            "title": doc.get("title"),
+            "title": file_meta.get("name", ""),
+            "error": f"range_start_text '{range_start_text}' not found",
+        }
+
+    end_match = re.search(re.escape(range_end_text), current_html[start_match.start():], flags)
+    if not end_match:
+        return {
+            "documentId": document_id,
+            "title": file_meta.get("name", ""),
+            "error": f"range_end_text '{range_end_text}' not found after range_start_text",
+        }
+
+    abs_range_start = start_match.start()
+    abs_range_end = start_match.start() + end_match.end()
+
+    # Extract the range section
+    range_section = current_html[abs_range_start:abs_range_end]
+
+    # Replace within the range
+    pattern = re.compile(re.escape(find_text), flags)
+    occurrences = len(pattern.findall(range_section))
+    modified_section = pattern.sub(replacement_html, range_section)
+
+    if occurrences == 0:
+        return {
+            "documentId": document_id,
+            "title": file_meta.get("name", ""),
             "findText": find_text,
-            "range": {"startIndex": start_index, "endIndex": end_index},
             "occurrencesReplaced": 0,
         }
 
-    # Build requests in reverse document order to preserve earlier indices
-    requests: List[Dict[str, Any]] = []
-    for ds, de, _m in sorted(in_range, key=lambda t: t[0], reverse=True):
-        requests.append(
-            {"deleteContentRange": {"range": {"startIndex": ds, "endIndex": de}}}
-        )
-        if replacement:
-            requests.append(
-                {"insertText": {"location": {"index": ds}, "text": replacement}}
-            )
+    combined = current_html[:abs_range_start] + modified_section + current_html[abs_range_end:]
 
-    result = safe_batch_update(docs_service, document_id, requests)
-    if "error" in result:
-        return result
+    upload_err = _upload_html(drive_service, document_id, combined)
+    if upload_err:
+        return upload_err
 
     return {
         "documentId": document_id,
-        "title": doc.get("title"),
+        "title": file_meta.get("name", ""),
         "findText": find_text,
-        "replacement": replacement,
-        "range": {"startIndex": start_index, "endIndex": end_index},
-        "occurrencesReplaced": len(in_range),
+        "occurrencesReplaced": occurrences,
+        "status": "replaced",
     }
 
 
-_HEADING_LEVELS = {
-    "HEADING_1": 1,
-    "HEADING_2": 2,
-    "HEADING_3": 3,
-    "HEADING_4": 4,
-    "HEADING_5": 5,
-    "HEADING_6": 6,
-}
-
-
-def _get_heading_level(element: Dict[str, Any]) -> Optional[int]:
-    """Return the heading level (1-6) of an element, or None if not a heading."""
-    if "paragraph" not in element:
-        return None
-    style = (
-        element["paragraph"]
-        .get("paragraphStyle", {})
-        .get("namedStyleType", "NORMAL_TEXT")
-    )
-    return _HEADING_LEVELS.get(style)
-
-
-def replace_section_content(
+def replace_section_content_with_html(
     document_id: str,
     heading_text: str,
-    replacement: str,
+    replacement_html: str,
     match_case: bool = False,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
-    """Replace the body content of a section identified by its heading text.
+    """Replace the body content of a section identified by its heading with HTML.
 
-    Finds the first heading whose text matches ``heading_text`` (stripped of
-    whitespace for comparison).  The "section body" spans from the end of
-    that heading to the start of the next heading at the same or higher
-    level, or the end of the document.
-
-    The heading itself is preserved — only the body content is replaced.
-
-    .. warning:: Not safe for concurrent edits.
+    Exports the document as HTML, finds the heading element matching
+    ``heading_text``, and replaces all content between it and the next
+    same-or-higher level heading (or end of body) with ``replacement_html``.
+    The heading itself is preserved.
     """
     if err := validate_document_id(document_id):
         return err
@@ -449,113 +504,82 @@ def replace_section_content(
     if not heading_text.strip():
         return {"error": "heading_text must contain non-whitespace characters"}
 
-    docs_service = ctx.request_context.lifespan_context.docs_service
+    drive_service = ctx.request_context.lifespan_context.drive_service
 
-    doc = docs_service.documents().get(documentId=document_id).execute()
-    body = doc.get("body", {})
-    content = body.get("content", [])
+    current_html, file_meta, err = _export_html(drive_service, document_id)
+    if err:
+        return err
 
-    # --- Locate the target heading ---
+    flags = 0 if match_case else re.IGNORECASE
     target = heading_text.strip()
-    target_cmp = target if match_case else target.lower()
 
-    heading_idx: Optional[int] = None
-    heading_level: Optional[int] = None
+    # Find the heading element in HTML (h1-h6)
+    heading_pattern = re.compile(
+        r"(<h([1-6])[^>]*>.*?" + re.escape(target) + r".*?</h\2>)",
+        flags | re.DOTALL,
+    )
+    heading_match = heading_pattern.search(current_html)
 
-    for i, element in enumerate(content):
-        level = _get_heading_level(element)
-        if level is None:
-            continue
-        elem_text = _extract_paragraph_text(element["paragraph"]).strip()
-        elem_cmp = elem_text if match_case else elem_text.lower()
-        if elem_cmp == target_cmp:
-            heading_idx = i
-            heading_level = level
-            break
-
-    if heading_idx is None:
+    if not heading_match:
         return {
             "documentId": document_id,
-            "title": doc.get("title"),
-            "headingText": heading_text.strip(),
+            "title": file_meta.get("name", ""),
+            "headingText": target,
             "found": False,
         }
 
-    # --- Determine section body boundaries ---
-    heading_element = content[heading_idx]
-    body_start = heading_element.get("endIndex", 0)
+    heading_level = int(heading_match.group(2))
+    section_start = heading_match.end()
 
-    # Scan forward for the next heading at same or higher level
-    body_end = body_start  # default: empty section
-    found_boundary = False
+    # Find the next heading at same or higher level
+    next_heading_pattern = re.compile(
+        r"<h([1-" + str(heading_level) + r"])[^>]*>",
+        re.IGNORECASE,
+    )
+    next_match = next_heading_pattern.search(current_html[section_start:])
 
-    for element in content[heading_idx + 1 :]:
-        level = _get_heading_level(element)
-        if level is not None and level <= heading_level:
-            # Same or higher level heading — section ends here
-            body_end = element.get("startIndex", body_start)
-            found_boundary = True
-            break
+    if next_match:
+        section_end = section_start + next_match.start()
+    else:
+        # Section extends to </body> or end of document
+        body_end = re.search(r"</body>", current_html[section_start:], re.IGNORECASE)
+        if body_end:
+            section_end = section_start + body_end.start()
+        else:
+            section_end = len(current_html)
 
-    if not found_boundary:
-        # Section extends to end of document
-        if heading_idx + 1 < len(content):
-            body_end = content[-1].get("endIndex", body_start)
-        # else: heading is the only/last element — body_end stays at body_start
+    combined = (
+        current_html[:section_start]
+        + replacement_html
+        + current_html[section_end:]
+    )
 
-    # --- Build and execute requests ---
-    section_range = {"startIndex": body_start, "endIndex": body_end}
-
-    requests: List[Dict[str, Any]] = []
-
-    if body_start < body_end:
-        requests.append(
-            {
-                "deleteContentRange": {
-                    "range": {
-                        "startIndex": body_start,
-                        "endIndex": body_end,
-                    }
-                }
-            }
-        )
-
-    if replacement:
-        requests.append(
-            {
-                "insertText": {
-                    "location": {"index": body_start},
-                    "text": replacement,
-                }
-            }
-        )
-
-    if requests:
-        result = safe_batch_update(docs_service, document_id, requests)
-        if "error" in result:
-            return result
+    upload_err = _upload_html(drive_service, document_id, combined)
+    if upload_err:
+        return upload_err
 
     return {
         "documentId": document_id,
-        "title": doc.get("title"),
-        "headingText": heading_text.strip(),
+        "title": file_meta.get("name", ""),
+        "headingText": target,
         "found": True,
-        "sectionRange": section_range,
-        "replacement": replacement,
+        "status": "replaced",
     }
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
 
 
 def register(registry: ToolRegistry) -> None:
     """Register all Docs write tools in the registry."""
     registry.register(
-        name="insert_text",
+        name="insert_text_with_html",
         description=(
-            "Insert text at a specific position in a Google Document. "
-            "Index 1 is the beginning of the document body. "
-            "Use segment_id to insert into a header or footer "
-            "(pass the header/footer ID from create_header/create_footer). "
-            "When segment_id is provided the default index is 0 (start of segment), "
-            "so you can omit index entirely when inserting into a fresh header/footer."
+            "Insert HTML content into a Google Document at a specified position. "
+            "Supports 'beginning', 'end' (default), or 'after_text' to insert "
+            "after a specific text occurrence. Supports rich HTML formatting."
         ),
         parameters=[
             ToolParameter(
@@ -563,27 +587,28 @@ def register(registry: ToolRegistry) -> None:
                 "string",
                 "The ID of the document (from URL)",
             ),
-            ToolParameter("text", "string", "The text to insert"),
             ToolParameter(
-                "index",
-                "integer",
-                "Character index to insert at. "
-                "Defaults to 1 (start of body) for body text, "
-                "or 0 (start of segment) when segment_id is provided. "
-                "Omit to use the smart default.",
-                required=False,
+                "html_content",
+                "string",
+                "HTML content to insert. Supports standard HTML tags: "
+                "h1-h6, p, table, ul, ol, li, b, i, a, img, br, hr, etc.",
             ),
             ToolParameter(
-                "segment_id",
+                "position",
                 "string",
-                "Segment ID for inserting into a header or footer. "
-                "Use the ID returned by create_header or create_footer. "
-                "Omit to insert into the document body.",
+                "Where to insert: 'beginning', 'end' (default), or 'after_text'.",
+                required=False,
+                default="end",
+            ),
+            ToolParameter(
+                "after_text",
+                "string",
+                "Text to insert after (required when position='after_text').",
                 required=False,
             ),
         ],
-        tags=["docs", "write", "insert", "text", "content", "add", "header", "footer"],
-        fn=insert_text,
+        tags=["docs", "write", "insert", "html", "content", "add", "rich", "format"],
+        fn=insert_text_with_html,
     )
 
     registry.register(
@@ -613,8 +638,12 @@ def register(registry: ToolRegistry) -> None:
     )
 
     registry.register(
-        name="replace_text",
-        description=("Find and replace all occurrences of text in a Google Document."),
+        name="replace_text_with_html",
+        description=(
+            "Find and replace all occurrences of text with HTML content "
+            "in a Google Document. The find_text is searched as literal text. "
+            "The replacement can contain rich HTML formatting."
+        ),
         parameters=[
             ToolParameter(
                 "document_id",
@@ -622,7 +651,11 @@ def register(registry: ToolRegistry) -> None:
                 "The ID of the document (from URL)",
             ),
             ToolParameter("find_text", "string", "Text to find"),
-            ToolParameter("replacement", "string", "Replacement text"),
+            ToolParameter(
+                "replacement_html",
+                "string",
+                "HTML content to replace with. Supports standard HTML tags.",
+            ),
             ToolParameter(
                 "match_case",
                 "boolean",
@@ -631,8 +664,8 @@ def register(registry: ToolRegistry) -> None:
                 default=False,
             ),
         ],
-        tags=["docs", "write", "replace", "find", "text", "substitution"],
-        fn=replace_text,
+        tags=["docs", "write", "replace", "find", "html", "substitution", "rich"],
+        fn=replace_text_with_html,
     )
 
     registry.register(
@@ -699,11 +732,11 @@ def register(registry: ToolRegistry) -> None:
     )
 
     registry.register(
-        name="replace_first_text",
+        name="replace_first_text_with_html",
         description=(
-            "Replace only the first occurrence of text in a Google Document. "
-            "Useful when a document contains duplicate text and you need to "
-            "target just the first one. Uses atomic delete+insert."
+            "Replace only the first occurrence of text with HTML content "
+            "in a Google Document. Useful when a document contains duplicate "
+            "text and you need to target just the first one."
         ),
         parameters=[
             ToolParameter(
@@ -712,47 +745,10 @@ def register(registry: ToolRegistry) -> None:
                 "The ID of the document (from URL)",
             ),
             ToolParameter("find_text", "string", "Text to find"),
-            ToolParameter("replacement", "string", "Replacement text"),
             ToolParameter(
-                "match_case",
-                "boolean",
-                "Case-sensitive matching (default: false)",
-                required=False,
-                default=False,
-            ),
-        ],
-        tags=[
-            "docs", "write", "replace", "find", "text",
-            "first", "single", "occurrence",
-        ],
-        fn=replace_first_text,
-    )
-
-    registry.register(
-        name="replace_text_in_range",
-        description=(
-            "Replace all occurrences of text within a specific index range "
-            "in a Google Document. Only matches fully inside the range are "
-            "replaced. Use get_document or search_document to find indices. "
-            "Uses atomic delete+insert."
-        ),
-        parameters=[
-            ToolParameter(
-                "document_id",
+                "replacement_html",
                 "string",
-                "The ID of the document (from URL)",
-            ),
-            ToolParameter("find_text", "string", "Text to find"),
-            ToolParameter("replacement", "string", "Replacement text"),
-            ToolParameter(
-                "start_index",
-                "integer",
-                "Start of the index range (inclusive)",
-            ),
-            ToolParameter(
-                "end_index",
-                "integer",
-                "End of the index range (exclusive)",
+                "HTML content to replace with. Supports standard HTML tags.",
             ),
             ToolParameter(
                 "match_case",
@@ -763,20 +759,64 @@ def register(registry: ToolRegistry) -> None:
             ),
         ],
         tags=[
-            "docs", "write", "replace", "find", "text",
-            "range", "index", "bounded", "scoped",
+            "docs", "write", "replace", "find", "html",
+            "first", "single", "occurrence", "rich",
         ],
-        fn=replace_text_in_range,
+        fn=replace_first_text_with_html,
     )
 
     registry.register(
-        name="replace_section_content",
+        name="replace_text_in_range_with_html",
+        description=(
+            "Replace all occurrences of text within a text-bounded range "
+            "with HTML content. Uses range_start_text and range_end_text "
+            "to define the search boundary instead of numeric indices. "
+            "Only matches within the bounded region are replaced."
+        ),
+        parameters=[
+            ToolParameter(
+                "document_id",
+                "string",
+                "The ID of the document (from URL)",
+            ),
+            ToolParameter("find_text", "string", "Text to find"),
+            ToolParameter(
+                "replacement_html",
+                "string",
+                "HTML content to replace with. Supports standard HTML tags.",
+            ),
+            ToolParameter(
+                "range_start_text",
+                "string",
+                "Text marking the start of the search range",
+            ),
+            ToolParameter(
+                "range_end_text",
+                "string",
+                "Text marking the end of the search range",
+            ),
+            ToolParameter(
+                "match_case",
+                "boolean",
+                "Case-sensitive matching (default: false)",
+                required=False,
+                default=False,
+            ),
+        ],
+        tags=[
+            "docs", "write", "replace", "find", "html",
+            "range", "bounded", "scoped", "rich",
+        ],
+        fn=replace_text_in_range_with_html,
+    )
+
+    registry.register(
+        name="replace_section_content_with_html",
         description=(
             "Replace the body content of a section identified by its heading "
-            "text. Finds the first heading matching the given text and replaces "
-            "everything between it and the next same-or-higher level heading "
-            "(or end of document). The heading itself is preserved. "
-            "Ideal for rewriting specific sections without calculating indices."
+            "text with HTML content. Finds the first heading matching the given "
+            "text and replaces everything between it and the next same-or-higher "
+            "level heading (or end of document). The heading itself is preserved."
         ),
         parameters=[
             ToolParameter(
@@ -787,12 +827,13 @@ def register(registry: ToolRegistry) -> None:
             ToolParameter(
                 "heading_text",
                 "string",
-                "The heading text to find (matched after stripping whitespace)",
+                "The heading text to find",
             ),
             ToolParameter(
-                "replacement",
+                "replacement_html",
                 "string",
-                "New content to replace the section body with",
+                "HTML content to replace the section body with. "
+                "Supports standard HTML tags.",
             ),
             ToolParameter(
                 "match_case",
@@ -804,7 +845,7 @@ def register(registry: ToolRegistry) -> None:
         ],
         tags=[
             "docs", "write", "replace", "section", "heading",
-            "content", "anchor", "structured",
+            "html", "content", "anchor", "structured", "rich",
         ],
-        fn=replace_section_content,
+        fn=replace_section_content_with_html,
     )

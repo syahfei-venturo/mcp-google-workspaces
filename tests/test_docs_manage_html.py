@@ -1,9 +1,11 @@
-"""Tests for create_document_from_html."""
+"""Tests for create_document (file_path based)."""
 
-from unittest.mock import MagicMock, patch, call
+import os
+import tempfile
+from unittest.mock import MagicMock, patch
 
 from mcp_google_workspace.tools.docs.manage import (
-    create_document_from_html,
+    create_document,
     MAX_HTML_BYTES,
 )
 
@@ -32,33 +34,68 @@ def _drive_create_ok(doc_id="doc_new", name="Test Doc", parents=None):
     return svc
 
 
+def _write_temp_html(content: str) -> str:
+    """Write HTML content to a temp file and return the path."""
+    f = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False, encoding="utf-8"
+    )
+    f.write(content)
+    f.close()
+    return f.name
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
 
-class TestCreateDocumentFromHtmlValidation:
+class TestCreateDocumentValidation:
     def test_empty_title(self):
-        result = create_document_from_html("", "<p>hi</p>", ctx=_mock_ctx())
-        assert "error" in result
+        path = _write_temp_html("<p>hi</p>")
+        try:
+            result = create_document("", path, ctx=_mock_ctx())
+            assert "error" in result
+        finally:
+            os.unlink(path)
 
     def test_whitespace_title(self):
-        result = create_document_from_html("   ", "<p>hi</p>", ctx=_mock_ctx())
+        path = _write_temp_html("<p>hi</p>")
+        try:
+            result = create_document("   ", path, ctx=_mock_ctx())
+            assert "error" in result
+        finally:
+            os.unlink(path)
+
+    def test_empty_file_path(self):
+        result = create_document("Title", "", ctx=_mock_ctx())
         assert "error" in result
 
-    def test_empty_html_content(self):
-        result = create_document_from_html("Title", "", ctx=_mock_ctx())
+    def test_whitespace_file_path(self):
+        result = create_document("Title", "   ", ctx=_mock_ctx())
         assert "error" in result
 
-    def test_whitespace_html_content(self):
-        result = create_document_from_html("Title", "   \n  ", ctx=_mock_ctx())
+    def test_file_not_found(self):
+        result = create_document("Title", "/nonexistent/file.html", ctx=_mock_ctx())
         assert "error" in result
+        assert "not found" in result["error"].lower()
+
+    def test_empty_html_file(self):
+        path = _write_temp_html("   \n  ")
+        try:
+            result = create_document("Title", path, ctx=_mock_ctx())
+            assert "error" in result
+        finally:
+            os.unlink(path)
 
     def test_html_too_large(self):
         huge_html = "<p>" + "x" * (MAX_HTML_BYTES + 1) + "</p>"
-        result = create_document_from_html("Title", huge_html, ctx=_mock_ctx())
-        assert "error" in result
-        assert "exceeds" in result["error"].lower() or "large" in result["error"].lower()
+        path = _write_temp_html(huge_html)
+        try:
+            result = create_document("Title", path, ctx=_mock_ctx())
+            assert "error" in result
+            assert "exceeds" in result["error"].lower() or "large" in result["error"].lower()
+        finally:
+            os.unlink(path)
 
 
 # ---------------------------------------------------------------------------
@@ -66,106 +103,132 @@ class TestCreateDocumentFromHtmlValidation:
 # ---------------------------------------------------------------------------
 
 
-class TestCreateDocumentFromHtmlSuccess:
+class TestCreateDocumentSuccess:
     def test_creates_document_returns_info(self):
         svc = _drive_create_ok(
             doc_id="doc_abc", name="Report", parents=["folder_1"]
         )
         ctx = _mock_ctx(drive_service=svc)
+        path = _write_temp_html("<h1>Hello</h1><p>World</p>")
 
-        result = create_document_from_html(
-            "Report", "<h1>Hello</h1><p>World</p>", ctx=ctx
-        )
+        try:
+            result = create_document("Report", path, ctx=ctx)
 
-        assert "error" not in result
-        assert result["documentId"] == "doc_abc"
-        assert result["title"] == "Report"
-        assert result["folder"] == "folder_1"
+            assert "error" not in result
+            assert result["documentId"] == "doc_abc"
+            assert result["title"] == "Report"
+            assert result["folder"] == "folder_1"
+        finally:
+            os.unlink(path)
 
     def test_uses_default_folder(self):
         svc = _drive_create_ok(parents=["default_folder"])
         ctx = _mock_ctx(drive_service=svc, folder_id="default_folder")
+        path = _write_temp_html("<p>test</p>")
 
-        create_document_from_html("Title", "<p>test</p>", ctx=ctx)
+        try:
+            create_document("Title", path, ctx=ctx)
 
-        # Verify the file body includes parent folder
-        create_call = svc.files().create.call_args
-        body = create_call.kwargs.get("body", create_call[1].get("body", {}))
-        assert body["parents"] == ["default_folder"]
+            create_call = svc.files().create.call_args
+            body = create_call.kwargs.get("body", create_call[1].get("body", {}))
+            assert body["parents"] == ["default_folder"]
+        finally:
+            os.unlink(path)
 
     def test_custom_folder_overrides_default(self):
         svc = _drive_create_ok(parents=["custom_folder"])
         ctx = _mock_ctx(drive_service=svc, folder_id="default_folder")
+        path = _write_temp_html("<p>test</p>")
 
-        create_document_from_html(
-            "Title", "<p>test</p>", folder_id="custom_folder", ctx=ctx
-        )
+        try:
+            create_document(
+                "Title", path, folder_id="custom_folder", ctx=ctx
+            )
 
-        create_call = svc.files().create.call_args
-        body = create_call.kwargs.get("body", create_call[1].get("body", {}))
-        assert body["parents"] == ["custom_folder"]
+            create_call = svc.files().create.call_args
+            body = create_call.kwargs.get("body", create_call[1].get("body", {}))
+            assert body["parents"] == ["custom_folder"]
+        finally:
+            os.unlink(path)
 
     def test_no_folder_omits_parents(self):
         svc = _drive_create_ok()
         ctx = _mock_ctx(drive_service=svc, folder_id=None)
+        path = _write_temp_html("<p>test</p>")
 
-        create_document_from_html("Title", "<p>test</p>", ctx=ctx)
+        try:
+            create_document("Title", path, ctx=ctx)
 
-        create_call = svc.files().create.call_args
-        body = create_call.kwargs.get("body", create_call[1].get("body", {}))
-        assert "parents" not in body
+            create_call = svc.files().create.call_args
+            body = create_call.kwargs.get("body", create_call[1].get("body", {}))
+            assert "parents" not in body
+        finally:
+            os.unlink(path)
 
     def test_drive_api_called_with_correct_mimetypes(self):
         svc = _drive_create_ok()
         ctx = _mock_ctx(drive_service=svc)
+        path = _write_temp_html("<p>test</p>")
 
-        create_document_from_html("Title", "<p>test</p>", ctx=ctx)
+        try:
+            create_document("Title", path, ctx=ctx)
 
-        create_call = svc.files().create.call_args
-        body = create_call.kwargs.get("body", create_call[1].get("body", {}))
-        # Target mimeType must be Google Docs
-        assert body["mimeType"] == "application/vnd.google-apps.document"
+            create_call = svc.files().create.call_args
+            body = create_call.kwargs.get("body", create_call[1].get("body", {}))
+            assert body["mimeType"] == "application/vnd.google-apps.document"
+        finally:
+            os.unlink(path)
 
     def test_html_content_passed_as_media(self):
         """Verify MediaInMemoryUpload is used with text/html mimetype."""
         svc = _drive_create_ok()
         ctx = _mock_ctx(drive_service=svc)
+        path = _write_temp_html("<p>hello</p>")
 
-        with patch(
-            "mcp_google_workspace.tools.docs.manage.MediaInMemoryUpload"
-        ) as mock_media:
-            mock_media.return_value = MagicMock()
-            create_document_from_html("Title", "<p>hello</p>", ctx=ctx)
+        try:
+            with patch(
+                "mcp_google_workspace.tools.docs.manage.MediaInMemoryUpload"
+            ) as mock_media:
+                mock_media.return_value = MagicMock()
+                create_document("Title", path, ctx=ctx)
 
-            mock_media.assert_called_once()
-            call_args = mock_media.call_args
-            # First positional arg is the bytes
-            html_bytes = call_args[0][0]
-            assert html_bytes == b"<p>hello</p>"
-            # mimetype kwarg
-            assert call_args.kwargs.get("mimetype") == "text/html"
+                mock_media.assert_called_once()
+                call_args = mock_media.call_args
+                html_bytes = call_args[0][0]
+                assert html_bytes == b"<p>hello</p>"
+                assert call_args.kwargs.get("mimetype") == "text/html"
+        finally:
+            os.unlink(path)
 
     def test_utf8_html_encoded_properly(self):
         """Non-ASCII HTML should be encoded as UTF-8."""
         svc = _drive_create_ok()
         ctx = _mock_ctx(drive_service=svc)
-
         html = "<p>日本語テスト</p>"
-        with patch(
-            "mcp_google_workspace.tools.docs.manage.MediaInMemoryUpload"
-        ) as mock_media:
-            mock_media.return_value = MagicMock()
-            create_document_from_html("Title", html, ctx=ctx)
+        path = _write_temp_html(html)
 
-            html_bytes = mock_media.call_args[0][0]
-            assert html_bytes == html.encode("utf-8")
+        try:
+            with patch(
+                "mcp_google_workspace.tools.docs.manage.MediaInMemoryUpload"
+            ) as mock_media:
+                mock_media.return_value = MagicMock()
+                create_document("Title", path, ctx=ctx)
+
+                html_bytes = mock_media.call_args[0][0]
+                assert html_bytes == html.encode("utf-8")
+        finally:
+            os.unlink(path)
 
     def test_root_folder_when_no_parents_in_response(self):
         svc = _drive_create_ok(parents=None)
         ctx = _mock_ctx(drive_service=svc)
+        path = _write_temp_html("<p>test</p>")
 
-        result = create_document_from_html("Title", "<p>test</p>", ctx=ctx)
-        assert result["folder"] == "root"
+        try:
+            result = create_document("Title", path, ctx=ctx)
+            assert result["folder"] == "root"
+        finally:
+            os.unlink(path)
 
 
 # ---------------------------------------------------------------------------
@@ -173,16 +236,19 @@ class TestCreateDocumentFromHtmlSuccess:
 # ---------------------------------------------------------------------------
 
 
-class TestCreateDocumentFromHtmlErrors:
+class TestCreateDocumentErrors:
     def test_api_error_propagated(self):
         svc = MagicMock()
         svc.files().create().execute.side_effect = Exception("Quota exceeded")
         ctx = _mock_ctx(drive_service=svc)
+        path = _write_temp_html("<p>test</p>")
 
-        result = create_document_from_html("Title", "<p>test</p>", ctx=ctx)
-        assert "error" in result
-        # Error messages are sanitized — internal details not exposed
-        assert "unexpected error" in result["error"]
+        try:
+            result = create_document("Title", path, ctx=ctx)
+            assert "error" in result
+            assert "unexpected error" in result["error"]
+        finally:
+            os.unlink(path)
 
 
 # ---------------------------------------------------------------------------
@@ -192,5 +258,5 @@ class TestCreateDocumentFromHtmlErrors:
 
 class TestHtmlConstants:
     def test_max_html_bytes_reasonable(self):
-        assert MAX_HTML_BYTES >= 100_000  # At least 100KB
-        assert MAX_HTML_BYTES <= 10_000_000  # Not more than 10MB
+        assert MAX_HTML_BYTES >= 100_000
+        assert MAX_HTML_BYTES <= 10_000_000
