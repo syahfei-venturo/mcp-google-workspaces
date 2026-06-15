@@ -200,9 +200,9 @@ def _resolve_credentials() -> Any:
 def _build_services(creds: Any) -> WorkspaceContext:
     """Build all Google API service clients (blocking I/O)."""
     return WorkspaceContext(
-        sheets_service=build("sheets", "v4", credentials=creds),
-        docs_service=build("docs", "v1", credentials=creds),
-        drive_service=build("drive", "v3", credentials=creds),
+        sheets_service=build("sheets", "v4", credentials=creds, cache_discovery=False),
+        docs_service=build("docs", "v1", credentials=creds, cache_discovery=False),
+        drive_service=build("drive", "v3", credentials=creds, cache_discovery=False),
         folder_id=DRIVE_FOLDER_ID if DRIVE_FOLDER_ID else None,
     )
 

@@ -608,6 +608,115 @@ def _send_error(conn, captured, rg, error_msg, tb=None):
 # ---------------------------------------------------------------------------
 
 
+def _execute_inline(code_str: str, tool_names: List[str], tool_metadata: Dict[str, Any], registry: Any, ctx: Any, memory_limit_bytes: int) -> Dict[str, Any]:
+    """Execute code inline (no subprocess) for Windows fallback."""
+    import sys
+    
+    captured = _LimitedWriter(MAX_OUTPUT_BYTES)
+    old_stdout = sys.stdout
+    sys.stdout = captured  # type: ignore[assignment]
+    
+    tool_calls_log = []
+    
+    try:
+        from RestrictedPython import compile_restricted, safe_builtins
+        from RestrictedPython.Guards import guarded_unpack_sequence, safer_getattr
+        from RestrictedPython.PrintCollector import PrintCollector
+        
+        byte_code = compile_restricted(code_str, filename="<sandbox>", mode="exec")
+        if byte_code is None:
+            return {"error": "Code rejected by sandbox", "output": "", "tool_calls": []}
+            
+        def _make_proxy(name: str):
+            def proxy(**kwargs):
+                try:
+                    tool = registry.get(name)
+                    if tool is None:
+                        raise RuntimeError(f"Tool '{name}' not found")
+                    result = retry_on_api_error(tool.fn)(**kwargs, ctx=ctx)
+                    tool_calls_log.append({"tool": name, "result": _ensure_serializable(result)})
+                    return result
+                except Exception as exc:
+                    tool_calls_log.append({"tool": name, "error": str(exc)})
+                    raise RuntimeError(f"Tool '{name}' error: {exc}")
+            proxy.__name__ = name
+            return proxy
+
+        builtins = dict(safe_builtins)
+        builtins["__import__"] = _safe_import
+        builtins["_getattr_"] = safer_getattr
+        builtins["_getitem_"] = lambda obj, key: obj[key]
+        builtins["_getiter_"] = iter
+        builtins["_write_"] = lambda obj: obj
+        builtins["_inplacevar_"] = _inplacevar
+        builtins["_unpack_sequence_"] = guarded_unpack_sequence
+        builtins["_iter_unpack_sequence_"] = guarded_unpack_sequence
+        builtins["_apply_"] = lambda func, *args, **kwargs: func(*args, **kwargs)
+        
+        _extra_builtins = {
+            "True": True, "False": False, "None": None, "bool": bool, "int": int, "float": float,
+            "str": str, "bytes": bytes, "bytearray": bytearray, "complex": complex, "list": list,
+            "dict": dict, "tuple": tuple, "set": set, "frozenset": frozenset, "type": type,
+            "object": object, "abs": abs, "all": all, "any": any, "bin": bin, "chr": chr,
+            "ord": ord, "hex": hex, "oct": oct, "divmod": divmod, "enumerate": enumerate,
+            "filter": filter, "format": format, "hash": hash, "id": id, "isinstance": isinstance,
+            "issubclass": issubclass, "iter": iter, "len": len, "map": map, "max": max,
+            "min": min, "next": next, "pow": pow, "print": print, "range": range, "repr": repr,
+            "reversed": reversed, "round": round, "slice": slice, "sorted": sorted, "sum": sum,
+            "zip": zip, "hasattr": hasattr, "Exception": Exception, "TypeError": TypeError,
+            "ValueError": ValueError, "KeyError": KeyError, "IndexError": IndexError,
+            "AttributeError": AttributeError, "RuntimeError": RuntimeError, "StopIteration": StopIteration,
+            "ZeroDivisionError": ZeroDivisionError, "NotImplementedError": NotImplementedError,
+            "OverflowError": OverflowError, "ArithmeticError": ArithmeticError, "LookupError": LookupError,
+            "ImportError": ImportError, "OSError": OSError,
+        }
+        for k, v in _extra_builtins.items():
+            builtins.setdefault(k, v)
+
+        restricted_globals = {
+            "__builtins__": builtins,
+            "__name__": "__sandbox__",
+            "__metaclass__": type,
+            "_getattr_": safer_getattr,
+            "_getitem_": lambda obj, key: obj[key],
+            "_getiter_": iter,
+            "_write_": lambda obj: obj,
+            "_inplacevar_": _inplacevar,
+            "_print_": PrintCollector,
+            "sandbox_result": None,
+            "tools": sorted(tool_names),
+            "help": _build_help(tool_metadata),
+        }
+
+        for name in tool_names:
+            restricted_globals[name] = _make_proxy(name)
+
+        exec(byte_code, restricted_globals)
+
+        result_value = _ensure_serializable(restricted_globals.get("sandbox_result"))
+        
+        pc = restricted_globals.get("_print")
+        printed_text = ""
+        if pc and callable(pc):
+            try:
+                printed_text = str(pc())
+            except Exception: pass
+            
+        output = printed_text + captured.getvalue()
+        return {
+            "output": output,
+            "result": result_value,
+            "tool_calls": tool_calls_log
+        }
+    except Exception as exc:
+        return {
+            "error": str(exc),
+            "output": captured.getvalue(),
+            "tool_calls": tool_calls_log
+        }
+    finally:
+        sys.stdout = old_stdout
+
 def execute_script(
     code: str,
     registry: Any,
@@ -667,6 +776,14 @@ def execute_script(
             }
 
     # --- Spawn child process ---
+    # Windows fallback for multiprocessing compatibility
+    if sys.platform == "win32":
+        try:
+            # Inline execution without process isolation on Windows
+            return _execute_inline(transformed, tool_names, tool_metadata, registry, ctx, memory_limit_bytes)
+        except Exception as e:
+             return {"error": f"Inline execution failed: {e}", "output": "", "tool_calls": []}
+
     mp_ctx = multiprocessing.get_context("spawn")
     parent_conn, child_conn = mp_ctx.Pipe()
 
